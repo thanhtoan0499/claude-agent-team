@@ -8,6 +8,8 @@ in=$(cat)
 ev=$(jq -r '.hook_event_name // empty' <<<"$in")
 agent=$(jq -r '.agent_type // "unknown"' <<<"$in")
 id=$(jq -r '.agent_id // empty' <<<"$in")
+# only our own agents: the host also fires SubagentStop for unrelated background agents
+case "$agent" in agent-team:*) ;; *) exit 0 ;; esac
 cwd=$(jq -r '.cwd // empty' <<<"$in"); [ -n "$cwd" ] || cwd=$PWD
 msg=$(jq -r '.last_assistant_message // empty' <<<"$in")
 log() { ( cd "$cwd" && "$DIR/team-log" "$@" ) 2>/dev/null || true; }

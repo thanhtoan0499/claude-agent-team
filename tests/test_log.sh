@@ -8,8 +8,9 @@ git -C "$T" init -q; cd "$T"
 "$B/team-log" task_assigned --to backend --task t1 --body "add endpoint"
 ! "$B/team-log" decision --body "x" 2>/dev/null || { echo "FAIL: decision without rationale accepted"; exit 1; }
 ! "$B/team-log" question --body "x" 2>/dev/null || { echo "FAIL: question without --from accepted"; exit 1; }
-echo '{"hook_event_name":"SubagentStop","agent_type":"backend","agent_id":"a1","cwd":"'"$T"'","last_assistant_message":"NEEDS_DECISION\nquestion: which id type?\noptions: uuid | int"}' | "$B/team-hook"
-echo '{"hook_event_name":"SubagentStop","agent_type":"backend","agent_id":"a1","cwd":"'"$T"'","last_assistant_message":"DONE\nchanged: a.py"}' | "$B/team-hook"
+echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:backend","agent_id":"a1","cwd":"'"$T"'","last_assistant_message":"NEEDS_DECISION\nquestion: which id type?\noptions: uuid | int"}' | "$B/team-hook"
+echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:backend","agent_id":"a1","cwd":"'"$T"'","last_assistant_message":"DONE\nchanged: a.py"}' | "$B/team-hook"
+echo '{"hook_event_name":"SubagentStop","agent_type":"","agent_id":"zz","cwd":"'"$T"'","last_assistant_message":"noise"}' | "$B/team-hook"
 "$B/team-log" decision --from master --to backend --body "uuid" --rationale "matches existing ids"
 f=.team-log/demo/events.ndjson
 [ "$(wc -l < $f)" = 5 ] || { echo "FAIL: expected 5 events, got $(wc -l < $f)"; exit 1; }
