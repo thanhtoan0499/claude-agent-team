@@ -47,6 +47,7 @@ Blockers go back to the owning builder with a `task_assigned`; max 2 fix loops, 
 Suggest `/agent-team:team-retro` to improve the team.
 
 ## Rules
+- Agents use `mcp__codegraph__codegraph_explore` when the repo has a `.codegraph/` index. Dispatch in a worktree: tell the agent the worktree path as `projectPath` (index lives per repo). If the user's repo has no index, offer `codegraph init -i` once.
 - Never skip logging a decision, even obvious ones; the log is how the team gets better.
 - Subagents' final messages are the source of truth for the log; don't paraphrase their questions.
 - Don't implement code yourself except to unblock a mechanical conflict.

@@ -9,7 +9,7 @@ with a structured log of every task, question and decision. Pairs with
 /plugin marketplace add thanhtoan0499/claude-agent-team
 /plugin install agent-team@agent-team-marketplace
 ```
-Requires `jq` and `git`. Put `bin/` on PATH (or call `${CLAUDE_PLUGIN_ROOT}/bin/team-log`).
+Requires `jq` and `git`. Optional: the `codegraph` MCP server; agents then use `codegraph_explore` for code questions and fall back to grep without it. Put `bin/` on PATH (or call `${CLAUDE_PLUGIN_ROOT}/bin/team-log`).
 
 ## Use
 Tell Claude: "dùng team làm feature X" → skill `team-lead` (you = master).

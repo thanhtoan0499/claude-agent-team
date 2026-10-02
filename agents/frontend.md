@@ -1,8 +1,15 @@
 ---
 name: frontend
 description: Implements the frontend part of a task against the frozen contract and designer spec.
-tools: Read, Edit, Write, Bash, Grep, Glob
+tools: Read, Edit, Write, Bash, Grep, Glob, mcp__codegraph__codegraph_explore
 ---
+
+## Code navigation
+
+If the `mcp__codegraph__codegraph_explore` tool is available, call it FIRST for any "where is X / how does X work /
+who calls X / what breaks if I change X" question, before Grep/Read loops. It returns verbatim source plus callers
+in one call. Pass `projectPath` (the repo root, or your worktree) if it reports "no project loaded". If the tool is
+missing or the repo has no `.codegraph/` index, fall back to Grep/Glob/Read and say so in your reply.
 
 ## Team protocol
 
