@@ -51,6 +51,17 @@ The master may only raise a model per dispatch (size L, R2 diagnosis, re-dispatc
 (`skills/team-lead/references/triage.md`). The hook stamps the model on every `task_assigned`; `team.db` has a `model` column so
 `team-retro` can compare outcomes per model. `tests/test_skills.sh` fails if an agent's `model:` drifts from that table.
 
+## Logging for optimisation (v0.1.17)
+- **Only the team's session is logged.** The session that opens the feature (`/agent-team:team-lead <ticket>` or `team-log feature_start`)
+  is bound in `.team-log/CURRENT.session`; prompts from another Claude Code session in the same repo never reach the ticket's log.
+  A new session on the same ticket re-runs `feature_start` to take over.
+- **Worktrees log into the active feature**, not into a slug per worktree name (the old cause of one ticket showing as 2-3 tickets).
+- **Cost per agent run.** `worker_done`/`question` carry the model it really ran on and `tokens_in`, `tokens_cache`, `tokens_out`,
+  `secs`, `turns`, read from the subagent transcript; `team.db` has the same columns, `team-tui` shows model + tokens per report.
+- **The PR closes the log.** `gh pr create` by the master -> `pr` (URL) + `feature_end`, by the hook.
+- **Outcome.** `bin/team-outcome` asks GitHub what happened to every logged PR (state, reviews, changes requested, comments,
+  commits pushed after opening = rework, size, days) and appends an `outcome` event when it changed. `team-retro` runs it first.
+
 ## Naming: ticket number first
 A feature that tracks a ticket is named `<type>-<ticket>-<title-slug>` (e.g. `bug-8991-fe-serving-activate-version-moi-ghi-de-admin-layout`)
 and `team-tui` shows it as `[bug-8991] <title>`, so tickets are easy to scan and pick. Older logs without metadata are labelled from the
@@ -85,11 +96,13 @@ worktree name is the feature slug.
 
 | type | written by |
 |---|---|
+| `pr` (PR URL) + `feature_end` | hook, on the master's `gh pr create` |
+| `outcome` (`MERGED`/`OPEN`/`DRAFT`/`CLOSED` + counts) | `bin/team-outcome` |
 | `feature_start`, `feature_end`, `ticket_info`, `decision` (+`decided_by`), `review_finding`, `stack_provisioned`, `note` | master via `team-log` |
 | `gate` (verdict + codes for one open question) | `team-gate` |
 | `agent_started`, `worker_done`, `question` | `SubagentStart/Stop` hook. Body = the agent's FULL final report (read from the subagent transcript when the agent ends via `SubagentHandback`); a `NEEDS_DECISION` line makes it a `question`; `ref` = path of the agent's transcript |
 | `tool_call`, `error` | `PostToolUse` / `PostToolUseFailure` hook for agent-team agents (one line per call) |
-| `task_assigned` (master's brief), `escalation` (question to the user), `user_reply` (user prompt / answer), `error` (failed Agent/SendMessage/AskUserQuestion) | main-thread hooks (`PreToolUse` Agent/SendMessage/AskUserQuestion, `UserPromptSubmit`, `PostToolUse(Failure)`), **only while a feature is active**: `.team-log/CURRENT` set by `feature_start`, refreshed by every event, expires after 12 h idle, cleared by `feature_end` |
+| `task_assigned` (master's brief), `escalation` (question to the user), `user_reply` (user prompt / answer), `error` (failed Agent/SendMessage/AskUserQuestion) | main-thread hooks (`PreToolUse` Agent/SendMessage/AskUserQuestion, `UserPromptSubmit`, `PostToolUse(Failure)`), **only while a feature is active, from the session bound to it**: `.team-log/CURRENT` set by `feature_start`, refreshed by every event, expires after 12 h idle, cleared by `feature_end`; `.team-log/CURRENT.session` = that session |
 
 Appends are serialised with `flock` (parallel agents with large bodies would otherwise interleave lines). Timestamps carry milliseconds where GNU `date` supports it.
 

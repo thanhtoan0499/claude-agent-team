@@ -50,4 +50,5 @@ After verify PASS, ONE `AskUserQuestion` carrying the end report:
 built / decided by you / decided by the user / assumptions / **Baseline** (red on base: fixed in `<commit>`, still red + why) /
 verify evidence (commands, exit codes, counts, workers used). Options:
 `Commit + push + draft PR (Recommended)` / `Commit only, I push` / `Stop, I review the diff first`.
-Approval = their answer. Then commit (repo's commit format), push, open the PR as a draft, log `note` with the PR URL, then `feature_end`.
+Approval = their answer. Then commit (repo's commit format), push, open the PR as a draft with `gh pr create --draft`: the hook logs `pr` + `feature_end`
+from it. "Commit only" / "Stop": log `feature_end` yourself with what was left.

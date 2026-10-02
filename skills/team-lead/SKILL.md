@@ -71,13 +71,16 @@ Blockers climb `references/escalation-ladder.md` (R1 builder → R2 diagnosis �
 2. `team-report` for the gate and decided-by counts.
 3. ONE `AskUserQuestion` with the end report — built, decided by you, decided by the user, open assumptions, **Baseline**
    (fixed / still red + why), verify evidence — and the choice `Commit + push + draft PR` / `Commit only` / `Stop`.
-4. On approval: commit, push, draft PR, `note` with the PR URL. Then `team-log feature_end` (stops capture of the main thread)
-   and suggest `/agent-team:team-retro`.
+4. On approval: commit, push, `gh pr create --draft`. The hook logs `pr` (the URL) and `feature_end` from that command by
+   itself: do not log them by hand, and log nothing after it (the feature is closed). Suggest `/agent-team:team-retro`.
+   **New session on the same ticket** (resume, restart): re-run `team-log feature_start --ticket <n> ...` first; it binds this
+   session, otherwise the hook ignores this session's prompts and briefs.
 
 ## Logging contract
 **Automatic (hook — do NOT log by hand, it would duplicate):** `agent_started`, `question`, `worker_done` (FULL final report),
-`tool_call`, agent `error`; while a feature is active: `task_assigned` (every Agent/SendMessage brief), `escalation` (every
-AskUserQuestion), `user_reply` (every user prompt and answer), `error` (failed Agent/SendMessage/AskUserQuestion). The planner's
+`tool_call`, agent `error`, the model + token/time usage of every agent run; while a feature is active, from the session bound
+to it: `task_assigned` (every Agent/SendMessage brief), `escalation` (every
+AskUserQuestion), `user_reply` (every user prompt and answer), `error` (failed Agent/SendMessage/AskUserQuestion), `pr` + `feature_end` (on `gh pr create`). The planner's
 report is also saved to `plan.md`.
 
 **Yours:**
@@ -85,7 +88,7 @@ report is also saved to `plan.md`.
 - `baseline --verdict CLEAN|RED --body "<base sha; commands; red ids>"` — once, before the first builder edit.
 - `decision --from master [--to <agent>] --decided-by master|user|policy --body ... --rationale "<why, what was rejected>"` — every decision, yours or the user's.
 - `note --from master --body ...` (triage, plan changes, a check you ran, a user message the hook cannot see), `review_finding`,
-  `stack_provisioned`, `feature_end`.
+  `stack_provisioned`, `feature_end` (only when the run ends without a PR: stopped, abandoned).
 
 **Check:** after each agent returns and before you present to the user, `team-report | tail -20`. If something automatic is missing,
 backfill it with `team-log` prefixed `[backfilled]` and note it: a missing automatic event means the hook is broken

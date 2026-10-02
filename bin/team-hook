@@ -3,10 +3,15 @@
 #
 # agent-team:* subagents
 #   SubagentStart       -> agent_started (ref = subagent transcript)
-#   SubagentStop        -> question (report has a NEEDS_DECISION line) | worker_done, body = FULL final report
+#   SubagentStop        -> question (report has a NEEDS_DECISION line) | worker_done, body = FULL final report,
+#                          + the model it really ran on and its usage (tokens in/cache/out, seconds, turns) from its transcript
 #   PostToolUse         -> tool_call (one line: tool + key input)
 #   PostToolUseFailure  -> error
-# main thread (the master + the user), ONLY while a feature is active (.team-log/CURRENT touched < 12 h ago)
+# main thread (the master + the user), ONLY while a feature is active (.team-log/CURRENT touched < 12 h ago) AND only from the
+#   session bound to it (.team-log/CURRENT.session, written when that session opens the feature): another Claude Code
+#   session in the same repo is not the team, its prompts never reach the ticket's log.
+#   PostToolUse Bash `team-log feature_start ...` -> binds the session that ran it (re-run it to continue in a new session)
+#   PostToolUse Bash `gh pr create ...`           -> pr (the PR URL) then feature_end: the ticket's log closes itself
 #   UserPromptSubmit                   -> user_reply   (the user's prompt, verbatim)
 #     + `/agent-team:team-lead <ADO work-item URL | AB#n>` with no feature tracking that ticket yet
 #       -> feature_start --ticket n  (instant, deterministic: slug wi-n, or the existing feature of ticket n)
@@ -35,13 +40,14 @@ in=$(cat)
 # Cheap prefilter: this hook fires for EVERY prompt and tool call of the session. Skip the jq spawns unless the
 # payload mentions something we log (precise checks follow).
 case "$in" in
-  *agent-team:*|*UserPromptSubmit*|*SessionStart*|*AskUserQuestion*|*SendMessage*|*'"Agent"'*|*'"Task"'*) ;;
+  *agent-team:*|*UserPromptSubmit*|*SessionStart*|*AskUserQuestion*|*SendMessage*|*'"Agent"'*|*'"Task"'*|*team-log*|*"gh pr create"*) ;;
   *) exit 0 ;;
 esac
 ev=$(jq -r '.hook_event_name // empty' <<<"$in")
 agent=$(jq -r '.agent_type // "unknown"' <<<"$in")
 id=$(jq -r '.agent_id // empty' <<<"$in")
 cwd=$(jq -r '.cwd // empty' <<<"$in"); [ -n "$cwd" ] || cwd=$PWD
+sid=$(jq -r '.session_id // empty' <<<"$in")
 log() { ( cd "$cwd" && "$DIR/team-log" "$@" ) 2>/dev/null || true; }
 MAX=30000  # sanity cap on one logged body
 J() { jq -r "$1" <<<"$in"; }  # extract with a jq filter from the payload
@@ -83,7 +89,7 @@ save_plan() {
 }
 
 team_agent_event() {
-  local tool tp msg rep tries
+  local tool tp msg rep tries u m
   case "$ev" in
     SubagentStart)
       tp=$(agent_transcript || true)
@@ -107,10 +113,12 @@ team_agent_event() {
         echo "$sig" > "$lf" 2>/dev/null || true
       fi
       if [ "$agent" = agent-team:planner ] && [ -n "$msg" ]; then save_plan "$msg"; fi
+      # What this run cost: model actually used + tokens + wall time, so a retro can weigh quality against cost per model.
+      u=""; m=""; [ -n "$tp" ] && [ -f "$tp" ] && u=$(team_usage "$tp"); [ -n "$u" ] && { m=${u%% *}; u=${u#* }; }
       if grep -qE '^[[:space:]]*NEEDS_DECISION[[:space:]]*:?[[:space:]]*$' <<<"$msg"; then
-        log question --from "$agent" --agent-id "$id" --body "${msg:0:$MAX}" ${tp:+--ref "$tp"}
+        log question --from "$agent" --agent-id "$id" --body "${msg:0:$MAX}" ${tp:+--ref "$tp"} ${m:+--model "$m"} ${u:+--usage "$u"}
       else
-        log worker_done --from "$agent" --agent-id "$id" --body "${msg:0:$MAX}" ${tp:+--ref "$tp"}
+        log worker_done --from "$agent" --agent-id "$id" --body "${msg:0:$MAX}" ${tp:+--ref "$tp"} ${m:+--model "$m"} ${u:+--usage "$u"}
       fi ;;
     PostToolUse)
       tool=$(J '.tool_name // "?"')
@@ -122,11 +130,17 @@ team_agent_event() {
   esac
 }
 
-# Is a feature being run right now? CURRENT exists and was touched (by any logged event) within 12 h.
+# Is a feature being run right now, by THIS session? CURRENT exists and was touched (by any logged event) within 12 h, and
+# the session bound to it is this one (no binding yet, or no session id in the payload: any session, the pre-0.1.17 rule).
 feature_active() {
-  local cur; cur="$(team_root "$cwd")/.team-log/CURRENT"
-  [ -s "$cur" ] && [ -n "$(find "$cur" -mmin -720 2>/dev/null)" ]
+  local cur bound; cur="$(team_root "$cwd")/.team-log/CURRENT"
+  [ -s "$cur" ] && [ -n "$(find "$cur" -mmin -720 2>/dev/null)" ] || return 1
+  bound=$(cat "$(team_session_file "$cwd")" 2>/dev/null || true)
+  [ -z "$bound" ] || [ -z "$sid" ] || [ "$bound" = "$sid" ]
 }
+
+# This session runs the active feature from now on.
+bind_session() { [ -n "$sid" ] && echo "$sid" > "$(team_session_file "$cwd")" 2>/dev/null || true; }
 
 # `/agent-team:team-lead ...<ticket>` -> open (or reuse) the feature for that ticket right away.
 auto_start_feature() {
@@ -136,8 +150,10 @@ auto_start_feature() {
   [ -n "$tid" ] || tid=$(grep -oE 'AB#[0-9]+' <<<"$p" | head -1 | grep -oE '[0-9]+' || true)
   [ -n "$tid" ] || return 0
   cur="$(team_root "$cwd")/.team-log/CURRENT"
-  feature_active && head -1 "$cur" | grep -qE "(^|-)${tid}(-|\$)" && return 0   # already the active feature
+  # Already the active feature (e.g. continued in a new session): just take it over.
+  [ -s "$cur" ] && [ -n "$(find "$cur" -mmin -720 2>/dev/null)" ] && head -1 "$cur" | grep -qE "(^|-)${tid}(-|\$)" && { bind_session; return 0; }
   log feature_start --ticket "$tid" --from user --body "${p:0:$MAX}"
+  bind_session
   url=$(grep -oE 'https://dev\.azure\.com/[^[:space:]]*_workitems/edit/[0-9]+' <<<"$p" | head -1 || true)
   ( cd "$cwd" && nohup "$DIR/team-ticket" "$tid" ${url:+"$url"} >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
 }
@@ -164,6 +180,10 @@ card_due() {
 master_event() {
   local tool to desc body q
   [ -z "$id" ] || return 0                           # subagent calls are handled above; this is the main thread
+  if [ "$ev" = PostToolUse ] && [ "$(J '.tool_name // empty')" = Bash ] \
+     && grep -qE '(^|[/[:space:];&|])team-log[[:space:]]+feature_start' <<<"$(J '.tool_input.command // empty')"; then
+    bind_session; return 0                           # the master opened (or re-opened) the feature from this session
+  fi
   if [ "$ev" = UserPromptSubmit ]; then
     body=$(J '.prompt // .user_prompt // empty')
     # Messages the harness injects into the user's turn (subagent hand-backs, task notifications) are not the user's words, and their
@@ -204,6 +224,14 @@ master_event() {
     PostToolUse:AskUserQuestion)
       body=$(J '(.tool_response.answers // .tool_response // empty) | if type=="string" then . else tojson end')
       [ -n "$body" ] && log user_reply --from user --to master --body "${body:0:$MAX}" ;;
+    PostToolUse:Bash)
+      # A PR opened by the master closes the ticket's log: the URL is what team-outcome follows later.
+      grep -qE '(^|[;&|[:space:]])gh[[:space:]]+pr[[:space:]]+create' <<<"$(J '.tool_input.command // empty')" || return 0
+      body=$(J '.tool_response | if type=="string" then . else tojson end' | grep -oE 'https://github\.com/[^[:space:]"\\]+/pull/[0-9]+' | tail -1 || true)
+      [ -n "$body" ] || return 0
+      to=$(head -1 "$(team_root "$cwd")/.team-log/CURRENT")
+      log pr --from master --feature "$to" --body "$body"
+      log feature_end --from master --feature "$to" --body "PR opened: $body" ;;
     PostToolUseFailure:AskUserQuestion|PostToolUseFailure:Agent|PostToolUseFailure:Task|PostToolUseFailure:SendMessage)
       log error --from master --body "$tool failed: $(err_text)" ;;
   esac

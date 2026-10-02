@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# What happened to each ticket's PR after the team handed it over: the signal a retro needs to tell a good run from a bad
+# one (a run with few questions whose PR then needed 3 rounds of human review was not a good run).
+# For every feature, in every registered repo, whose log has a `pr` event: ask GitHub (`gh pr view`) for state, reviews,
+# comments and the commits pushed AFTER the PR was opened (= rework), and append an `outcome` event when it changed.
+# usage: team-outcome [--dry]      prints: repo  feature  verdict  counts  url
+#   verdict MERGED | CLOSED | OPEN | DRAFT; body "reviews=N changes_requested=N comments=N commits_after_open=N +add/-del files=N days=D"
+# Never fails on one PR (no gh auth, deleted repo): that line says "? <error>" and the rest carry on. TEAM_GH overrides gh (tests).
+set -uo pipefail
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "$DIR/_lib.sh"
+GH=${TEAM_GH:-gh}
+dry=; [ "${1:-}" = --dry ] && dry=1
+reg="$(team_home)/repos"
+[ -s "$reg" ] || { echo "no repo registered in $reg" >&2; exit 0; }
+while read -r src; do
+  [ -d "$src" ] || continue
+  for f in "$src"/*/events.ndjson; do
+    [ -f "$f" ] || continue
+    feat=$(basename "$(dirname "$f")")
+    url=$(jq -r 'select(.type=="pr") | .body' "$f" 2>/dev/null | tail -1)
+    [ -n "$url" ] || continue
+    last=$(jq -r 'select(.type=="outcome") | .verdict + " " + .body' "$f" 2>/dev/null | tail -1)
+    if ! js=$("$GH" pr view "$url" --json state,isDraft,createdAt,mergedAt,closedAt,reviews,comments,commits,additions,deletions,changedFiles 2>&1); then
+      printf '%s\t%s\t?\t%s\t%s\n' "$(basename "$(dirname "$src")")" "$feat" "$(head -1 <<<"$js")" "$url"; continue
+    fi
+    read -r verdict body < <(jq -r '
+      (.createdAt | fromdateiso8601) as $open
+      | (if .state=="MERGED" then "MERGED" elif .state=="CLOSED" then "CLOSED" elif .isDraft then "DRAFT" else "OPEN" end) as $v
+      | ((.mergedAt // .closedAt // (now|todate)) | fromdateiso8601) as $end
+      | "\($v) reviews=\(.reviews|length) changes_requested=\([.reviews[]|select(.state=="CHANGES_REQUESTED")]|length)"
+        + " comments=\(.comments|length)"
+        + " commits_after_open=\([.commits[] | select((.committedDate|fromdateiso8601) > $open)] | length)"
+        + " +\(.additions)/-\(.deletions) files=\(.changedFiles) days=\((($end - $open) / 86400 * 10 | floor) / 10)"' <<<"$js")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(basename "$(dirname "$src")")" "$feat" "$verdict" "$body" "$url"
+    [ -n "$dry" ] && continue
+    # days= keeps growing while a PR is open: compare without it, so an unchanged PR does not log a new event every run.
+    [ "${last% days=*}" = "$verdict ${body% days=*}" ] && continue
+    ( cd "$(dirname "$src")" && "$DIR/team-log" outcome --feature "$feat" --from github --verdict "$verdict" --ref "$url" --body "$body" ) \
+      || echo "  (could not log outcome for $feat)" >&2
+  done
+done < "$reg"
+exit 0

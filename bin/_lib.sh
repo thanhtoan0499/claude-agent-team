@@ -23,15 +23,37 @@ team_version() {
   sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../.claude-plugin/plugin.json" 2>/dev/null | head -1 || true
 }
 
-# Feature slug: $TEAM_FEATURE > worktree name (.claude/worktrees/<name>) > <root>/.team-log/CURRENT > "default"
+# Feature slug: $TEAM_FEATURE > active CURRENT (touched < 12 h) > worktree name (.claude/worktrees/<name>) > stale CURRENT > "default".
+# An active feature wins over the worktree name: the team's builders run in a worktree named after the branch (fix-8991), and
+# their events must land in the ticket's feature (bug-8991-...), not in a second slug per worktree.
 team_feature() {
-  local cwd="${1:-$PWD}" root
+  local cwd="${1:-$PWD}" cur
   [ -n "${TEAM_FEATURE:-}" ] && { echo "$TEAM_FEATURE"; return; }
+  cur="$(team_root "$cwd")/.team-log/CURRENT"
+  if [ -s "$cur" ] && [ -n "$(find "$cur" -mmin -720 2>/dev/null)" ]; then head -1 "$cur"; return; fi
   case "$cwd" in
     */.claude/worktrees/*) local rest="${cwd#*/.claude/worktrees/}"; echo "${rest%%/*}"; return ;;
   esac
-  root=$(team_root "$cwd")
-  if [ -s "$root/.team-log/CURRENT" ]; then head -1 "$root/.team-log/CURRENT"; else echo default; fi
+  if [ -s "$cur" ]; then head -1 "$cur"; else echo default; fi
+}
+
+# Claude Code session bound to the active feature: only that session's main-thread events (user prompts, briefs, questions)
+# are the team's. Another session in the same repo (plugin work, a "hi") must not leak into the ticket's log.
+team_session_file() { echo "$(team_root "${1:-$PWD}")/.team-log/CURRENT.session"; }
+
+# Usage of one subagent run from its transcript: "<model> <in> <cache> <out> <secs> <turns>" (in = uncached input incl. cache
+# writes, cache = cache reads). Each API message is written once per content block, so messages are de-duplicated by id.
+team_usage() {
+  jq -rs '[.[] | select(.type=="assistant" and .message.usage != null)] as $a
+    | ($a | unique_by(.message.id)) as $m
+    | [.[] | .timestamp // empty | sub("\\.[0-9]+Z$";"Z") | fromdateiso8601] as $t
+    | if ($m|length)==0 then empty else
+      [ ($m | last | .message.model // "?"),
+        ($m | map(.message.usage | (.input_tokens//0) + (.cache_creation_input_tokens//0)) | add),
+        ($m | map(.message.usage.cache_read_input_tokens//0) | add),
+        ($m | map(.message.usage.output_tokens//0) | add),
+        (if ($t|length)>1 then ($t|max) - ($t|min) else 0 end),
+        ($m|length) ] | map(tostring) | join(" ") end' "$1" 2>/dev/null
 }
 
 team_log_file() {

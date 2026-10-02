@@ -15,9 +15,10 @@ echo '{"hook_event_name":"SubagentStop","agent_type":"","agent_id":"zz","cwd":"'
 f=.team-log/demo/events.ndjson
 [ "$(wc -l < $f)" = 5 ] || { echo "FAIL: expected 5 events, got $(wc -l < $f)"; exit 1; }
 [ "$(jq -s 'map(select(.type=="question"))|length' $f)" = 1 ] || { echo "FAIL: question not logged"; exit 1; }
-# worktree path resolves to its own feature slug, shared root log
-mkdir -p .claude/worktrees/wt1; ( cd .claude/worktrees/wt1 && "$B/team-log" note --body hi )
-[ -s .team-log/wt1/events.ndjson ] || { echo "FAIL: worktree slug"; exit 1; }
+# worktree of the ACTIVE feature logs into that feature (not a slug per worktree), shared root log
+mkdir -p .claude/worktrees/wt1; ( cd .claude/worktrees/wt1 && "$B/team-log" note --body "from wt" )
+[ ! -e .team-log/wt1 ] && grep -q '"from wt"' $f || { echo "FAIL: worktree event left the active feature"; exit 1; }
+sed -i '$d' $f   # keep the event counts below as they were
 "$B/team-report" demo | tail -1
 # agent_id lands in log; TUI index pairs start/stop into a duration and keeps Q&A
 [ "$(jq -s 'map(select(.agent_id=="a1"))|length' $f)" -ge 2 ] || { echo "FAIL: agent_id not logged"; exit 1; }
@@ -284,4 +285,46 @@ r="$(C 4 0) $(C 4 0.2) $(C 4 1.5) $(C 4 9) $(C 1 0) $(C 2 5) $(C 16 2.0)"
 [ "$r" = "4 3 2 2 1 2 14" ] || { echo "FAIL: team-cores: $r"; exit 1; }
 w=$("$B/team-cores"); [ "$w" -ge 1 ] && [ "$w" -le "$(nproc)" ] || { echo "FAIL: team-cores on this box: $w"; exit 1; }
 unset TEAM_HOOK_RETRIES
+# ---- v0.1.17: session-scoped capture, usage per agent run, PR closes the log, PR outcome ----
+rm -rf .team-log/wi-777; rm -f .team-log/CURRENT .team-log/CURRENT.session
+P() { M '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'","session_id":"'"$1"'","prompt":"'"$2"'"}'; }
+PATH="$T/fakebin:$PATH" P s1 "/agent-team:team-lead AB#777"
+[ "$(cat .team-log/CURRENT.session)" = s1 ] || { echo "FAIL: /team-lead did not bind its session"; exit 1; }
+P s2 "hi from another session"; P s1 "ok tiếp đi"
+g=.team-log/wi-777/events.ndjson
+jq -s -e 'map(select(.type=="user_reply"))|map(.body)==["/agent-team:team-lead AB#777","ok tiếp đi"]' $g >/dev/null \
+  || { echo "FAIL: session scoping: $(jq -c 'select(.type=="user_reply")|.body' $g)"; exit 1; }
+# the master re-opens the feature from a new session (resume) -> that session takes over
+M '{"hook_event_name":"PostToolUse","cwd":"'"$T"'","session_id":"s3","tool_name":"Bash","tool_input":{"command":"team-log feature_start --ticket 777 --type bug --title X"},"tool_response":{"stdout":""}}'
+P s3 "continued"; P s1 "old session"
+jq -s -e 'map(select(.type=="user_reply"))|map(.body)|.[-1]=="continued"' $g >/dev/null || { echo "FAIL: rebind on feature_start"; exit 1; }
+# worktree with NO active feature keeps its own slug
+touch -d '13 hours ago' .team-log/CURRENT; ( cd .claude/worktrees/wt1 && "$B/team-log" note --body solo ); touch .team-log/CURRENT
+[ -s .team-log/wt1/events.ndjson ] || { echo "FAIL: worktree slug without an active feature"; exit 1; }
+# usage of an agent run, from its transcript (messages repeated per content block are counted once)
+tr=$T/agent-u1.jsonl
+printf '%s\n' '{"type":"user","timestamp":"2026-10-02T10:00:00.000Z"}' \
+  '{"type":"assistant","timestamp":"2026-10-02T10:00:05.000Z","message":{"id":"m1","model":"claude-sonnet-5-5","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":7},"content":[{"type":"text","text":"x"}]}}' \
+  '{"type":"assistant","timestamp":"2026-10-02T10:00:05.100Z","message":{"id":"m1","model":"claude-sonnet-5-5","usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":7},"content":[{"type":"tool_use","name":"Bash","input":{}}]}}' \
+  '{"type":"assistant","timestamp":"2026-10-02T10:01:30.000Z","message":{"id":"m2","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":110,"output_tokens":20},"content":[{"type":"text","text":"DONE usage"}]}}' > $tr
+M '{"hook_event_name":"SubagentStop","agent_type":"agent-team:qa","agent_id":"u1","cwd":"'"$T"'","agent_transcript_path":"'"$tr"'"}'
+jq -s -e 'map(select(.agent_id=="u1" and .type=="worker_done"))|.[0]|.model=="claude-sonnet-5-5" and .tokens_in==115 and .tokens_cache==110 and .tokens_out==27 and .secs==90 and .turns==2' $g >/dev/null \
+  || { echo "FAIL: usage: $(jq -c 'select(.agent_id=="u1")' $g)"; exit 1; }
+"$B/team-tui" --query "select tokens_out, turns from events where agent_id='u1'" | grep -q "^27	2" || { echo "FAIL: usage not in the index"; exit 1; }
+! "$B/team-log" note --body x --usage "1 2 3" 2>/dev/null || { echo "FAIL: bad --usage accepted"; exit 1; }
+# gh pr create -> pr event + feature_end, capture stops
+M '{"hook_event_name":"PostToolUse","cwd":"'"$T"'","session_id":"s3","tool_name":"Bash","tool_input":{"command":"gh pr create --draft --title t"},"tool_response":{"stdout":"https://github.com/acme/app/pull/42\n"}}'
+jq -s -e 'map(select(.type=="pr"))[0].body=="https://github.com/acme/app/pull/42" and .[-1].type=="feature_end"' $g >/dev/null || { echo "FAIL: PR did not close the log"; exit 1; }
+[ ! -e .team-log/CURRENT ] && [ ! -e .team-log/CURRENT.session ] || { echo "FAIL: CURRENT left after the PR"; exit 1; }
+# team-outcome: logs the PR state once, again only when it changes
+mkdir -p "$T/fakegh"; cat > "$T/fakegh/gh" <<'GH'
+#!/usr/bin/env bash
+cat "$(dirname "$0")/pr.json"
+GH
+chmod +x "$T/fakegh/gh"
+pj() { echo '{"state":"'"$1"'","isDraft":false,"createdAt":"2026-10-01T00:00:00Z","mergedAt":'"$2"',"closedAt":null,"reviews":[{"state":"CHANGES_REQUESTED"},{"state":"APPROVED"}],"comments":[{}],"commits":[{"committedDate":"2026-09-30T00:00:00Z"},{"committedDate":"2026-10-01T05:00:00Z"}],"additions":10,"deletions":2,"changedFiles":3}' > "$T/fakegh/pr.json"; }
+pj OPEN null; TEAM_GH="$T/fakegh/gh" "$B/team-outcome" >/dev/null; TEAM_GH="$T/fakegh/gh" "$B/team-outcome" >/dev/null
+pj MERGED '"2026-10-03T00:00:00Z"'; TEAM_GH="$T/fakegh/gh" "$B/team-outcome" | grep -q "MERGED" || { echo "FAIL: team-outcome output"; exit 1; }
+jq -s -e '[.[]|select(.type=="outcome")]|map(.verdict)==["OPEN","MERGED"] and (.[-1].body|startswith("reviews=2 changes_requested=1 comments=1 commits_after_open=1 +10/-2 files=3 days=2"))' $g >/dev/null \
+  || { echo "FAIL: outcome events: $(jq -c 'select(.type=="outcome")|[.verdict,.body]' $g)"; exit 1; }
 echo PASS

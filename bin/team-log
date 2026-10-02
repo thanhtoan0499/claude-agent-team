@@ -3,11 +3,16 @@
 # usage: team-log <type> [--from A] [--to B] [--task T] [--body TEXT] [--rationale TEXT] [--options "a|b"] [--agent-id ID] [--ref PATH] [--feature F]
 #        [--ticket N] [--type bug|task|us|...] [--title TEXT]   (ticket metadata, see naming rule below)
 #        [--model M]   (task_assigned: the model the agent runs on, so a retro can compare models)
+#        [--usage "IN CACHE OUT SECS TURNS"]   (worker_done/question: tokens + wall time of that agent run, written by the hook
+#                      from the subagent transcript -> numeric fields tokens_in, tokens_cache, tokens_out, secs, turns)
 # types: feature_start task_assigned question decision worker_done review_finding stack_provisioned agent_started note
 #        escalation (master -> user)  user_reply (user -> master, verbatim)  error  tool_call  feature_end
 #        ticket_info (ticket type/title, latest wins; usually written by team-ticket or the master)
 #        gate (a team-gate verdict: --verdict DECIDE|ASSUME|ESCALATE --codes OUT_OF_SCOPE,... --body <topic>)
 #        baseline (checks on the untouched base, before any edit: --verdict CLEAN|RED --body <summary; red check ids>)
+#        pr (a PR was opened: --body <PR URL>; written by the hook from `gh pr create`, which also ends the feature)
+#        outcome (what happened to the PR later: --verdict MERGED|OPEN|DRAFT|CLOSED --body "<counts>" --ref <PR URL>;
+#                 written by team-outcome, only when it changed)
 # decision also takes --decided-by master|user|policy (default master): who actually made the call. An agent's or
 #   the master's "accepted" is never a user approval; only decided_by=user means the user chose.
 # NAMING RULE: a feature that tracks a ticket is named  <type>-<ticket>-<title-slug>  (ticket number FIRST, e.g.
@@ -19,16 +24,16 @@
 set -euo pipefail
 . "$(dirname "$0")/_lib.sh"
 type="${1:-}"; [ -n "$type" ] || { echo "usage: team-log <type> [flags]" >&2; exit 2; }; shift
-from= to= task= body= rationale= options= feature= agent_id= ref= ticket= ttype= title= decided_by= verdict= codes= model=
+from= to= task= body= rationale= options= feature= agent_id= ref= ticket= ttype= title= decided_by= verdict= codes= model= usage=
 while [ $# -gt 0 ]; do
   case "$1" in
     --from) from=$2;; --to) to=$2;; --task) task=$2;; --body) body=$2;;
-    --rationale) rationale=$2;; --options) options=$2;; --feature) feature=$2;; --agent-id) agent_id=$2;; --ref) ref=$2;; --ticket) ticket=$2;; --type) ttype=$2;; --title) title=$2;; --decided-by) decided_by=$2;; --verdict) verdict=$2;; --codes) codes=$2;; --model) model=$2;;
+    --rationale) rationale=$2;; --options) options=$2;; --feature) feature=$2;; --agent-id) agent_id=$2;; --ref) ref=$2;; --ticket) ticket=$2;; --type) ttype=$2;; --title) title=$2;; --decided-by) decided_by=$2;; --verdict) verdict=$2;; --codes) codes=$2;; --model) model=$2;; --usage) usage=$2;;
     *) echo "unknown flag $1" >&2; exit 2;;
   esac; shift 2 || { echo "flag needs a value" >&2; exit 2; }
 done
 case "$type" in
-  feature_start|task_assigned|question|decision|worker_done|review_finding|stack_provisioned|agent_started|note|escalation|user_reply|error|tool_call|feature_end|ticket_info|gate|baseline) ;;
+  feature_start|task_assigned|question|decision|worker_done|review_finding|stack_provisioned|agent_started|note|escalation|user_reply|error|tool_call|feature_end|ticket_info|gate|baseline|pr|outcome) ;;
   *) echo "bad type: $type" >&2; exit 2;;
 esac
 [ "$type" = question ] && { [ -n "$from" ] && [ -n "$body" ] || { echo "question needs --from and --body" >&2; exit 2; }; }
@@ -47,6 +52,15 @@ if [ "$type" = baseline ]; then
   case "$verdict" in CLEAN|RED) ;; *) echo "baseline needs --verdict CLEAN|RED" >&2; exit 2;; esac
   [ -n "$body" ] || { echo "baseline needs --body (what ran; the red check ids)" >&2; exit 2; }
 fi
+[ "$type" = pr ] && { [[ "$body" == http* ]] || { echo "pr needs --body <PR URL>" >&2; exit 2; }; }
+if [ "$type" = outcome ]; then
+  case "$verdict" in MERGED|OPEN|DRAFT|CLOSED) ;; *) echo "outcome needs --verdict MERGED|OPEN|DRAFT|CLOSED" >&2; exit 2;; esac
+  [ -n "$ref" ] || { echo "outcome needs --ref <PR URL>" >&2; exit 2; }
+fi
+read -r u_in u_cache u_out u_secs u_turns <<<"$usage" || true
+for v in "$u_in" "$u_cache" "$u_out" "$u_secs" "$u_turns"; do
+  case "$v" in ""|*[!0-9]*) [ -z "$usage" ] || { echo "--usage needs 5 numbers: IN CACHE OUT SECS TURNS" >&2; exit 2; };; esac
+done
 [ "$type" = ticket_info ] && { [ -n "$ticket" ] || { echo "ticket_info needs --ticket" >&2; exit 2; }; }
 start=
 if [ -n "$ticket" ] && [ -z "$feature" ]; then
@@ -68,7 +82,9 @@ ts=$(date -u +%FT%T.%3NZ); case "$ts" in *N*) ts=$(date -u +%FT%TZ);; esac   # m
 line=$(jq -cn --arg ts "$ts" --arg feature "$(team_feature)" --arg type "$type" \
   --arg from "$from" --arg to "$to" --arg task "$task" --arg body "$body" \
   --arg rationale "$rationale" --arg options "$options" --arg agent_id "$agent_id" --arg ref "$ref" --arg ticket "$ticket" --arg ttype "$ttype" --arg title "$title" --arg decided_by "$decided_by" --arg verdict "$verdict" --arg codes "$codes" --arg model "$model" --arg plugin_version "$ver" \
+  --arg usage "$usage" --arg ui "${u_in:-}" --arg uc "${u_cache:-}" --arg uo "${u_out:-}" --arg us "${u_secs:-}" --arg ut "${u_turns:-}" \
   '{ts:$ts,feature:$feature,type:$type,from:$from,to:$to,task:$task,body:$body,rationale:$rationale,options:($options|split("|")|map(select(length>0))),agent_id:$agent_id,ref:$ref,ticket:$ticket,ticket_type:$ttype,title:$title,decided_by:$decided_by,verdict:$verdict,codes:$codes,model:$model,plugin_version:$plugin_version}
+   + (if $usage == "" then {} else {tokens_in:($ui|tonumber),tokens_cache:($uc|tonumber),tokens_out:($uo|tonumber),secs:($us|tonumber),turns:($ut|tonumber)} end)
    | with_entries(select(.value != "" and .value != []))')
 # One event = one line, appended under an exclusive lock. Without it, parallel agents writing bodies larger than
 # the pipe/stdio buffer (~4 KB) interleave and corrupt the NDJSON (measured: 24 writers x 30 KB -> 11 bad lines).
@@ -79,6 +95,6 @@ if command -v flock >/dev/null 2>&1; then ( flock -x 9; append ) 9>>"$file.lock"
 r=$(team_root); cur="$r/.team-log/CURRENT"
 if [ -n "$start" ]; then mkdir -p "$r/.team-log"; team_feature > "$cur"
 elif [ -f "$cur" ] && [ "$(head -1 "$cur")" = "$(team_feature)" ]; then
-  if [ "$type" = feature_end ]; then rm -f "$cur"; else touch "$cur"; fi
+  if [ "$type" = feature_end ]; then rm -f "$cur" "$cur.session"; else touch "$cur"; fi
 fi
 exit 0
