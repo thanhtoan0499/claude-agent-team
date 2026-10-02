@@ -10,6 +10,16 @@ planner shows the work is bigger.
 | **M** | feature or cross-layer bug, additive contract, no migration | planner → designer only if NEW UI states → backend ∥ frontend → qa → reviewer | 1: plan |
 | **L** | breaking/new contract, migration, cross-context, security/tenant, new infra | full team | 2: plan, then again before the first irreversible step (migration, deploy) |
 
+Models (default in each agent's `model:`; the hook logs the model of every dispatch on `task_assigned`)
+| agent | default | why |
+|---|---|---|
+| master (your session, `/model`) | Opus | decides and integrates; its mistakes spread to every phase |
+| planner, reviewer | opus | a wrong contract misleads the whole team; a reviewer weaker than the builder catches nothing |
+| backend, frontend, qa, designer | sonnet | the contract is frozen, the work is bounded |
+You may only **raise** a model, per dispatch (`Agent` `model: "opus"`), and say why in the brief:
+size **L**; an **R2** diagnosis; a builder re-dispatched after R1 failed on the same finding. Never lower planner/reviewer, never
+pick a model by mood. `SendMessage` resumes on the same model: an upgrade is a new dispatch with the handoff note.
+
 Rules of thumb
 - Bug tickets: the first task is always a failing test that reproduces it (repo rule); qa writes it before the fix starts.
 - At most 2 builders in parallel per feature, and only on disjoint files ("one file, one owner"); otherwise serialize.

@@ -5,7 +5,7 @@ Fix loops (qa/reviewer finding, failing test) escalate in rounds. Keep the round
 | round | action |
 |---|---|
 | R1 | Send the finding back to the owning builder (`SendMessage`). The message must say: what failed, what you changed last time, what to do differently. A retry without that reflection repeats the mistake. |
-| R2 | Same or related failure again. Write a handoff note (what was tried, why it failed, what is ruled out). Dispatch `agent-team:qa` to **diagnose, not fix**: reproduce, root cause, evidence. The builder then fixes from the diagnosis, by path. |
+| R2 | Same or related failure again. Write a handoff note (what was tried, why it failed, what is ruled out). Dispatch `agent-team:qa` on `model: "opus"` to **diagnose, not fix**: reproduce, root cause, evidence. The builder then fixes from the diagnosis, by path. |
 | R3 | Stop. ONE `AskUserQuestion`: take over / new direction / abandon, with links to the handoff note and diagnosis. |
 
 Stuck: any agent that hits the same error 3 times, or its 8-iteration budget, stops and reports (it is in every brief). You do not

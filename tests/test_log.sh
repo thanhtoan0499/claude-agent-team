@@ -117,6 +117,7 @@ M '{"hook_event_name":"PostToolUse","cwd":"'"$T"'","tool_name":"Bash","tool_inpu
 t() { jq -s -e "$1" $f5 >/dev/null || { echo "FAIL: $2"; exit 1; }; }
 t 'map(select(.type=="user_reply" and .body=="cho mình xem plan" and .from=="user"))|length==1' "UserPromptSubmit -> user_reply"
 t 'map(select(.type=="task_assigned" and .to=="agent-team:planner" and .task=="plan it" and .body=="Plan the fix for X"))|length==1' "Agent -> task_assigned"
+t 'map(select(.type=="task_assigned" and .to=="agent-team:planner" and .model=="opus"))|length==1' "task_assigned carries the agent file's model"
 t 'map(select(.type=="task_assigned" and .to=="planner" and .body=="decision: A"))|length==1' "SendMessage -> task_assigned"
 t 'map(select(.type=="escalation" and (.body|test("Scope")) and (.body|test("actor only")) and .options==["A","B"]))|length==1' "AskUserQuestion -> escalation"
 t 'map(select(.type=="user_reply" and (.body|test("\"A\""))))|length==1' "AskUserQuestion answer -> user_reply"
@@ -267,5 +268,20 @@ d=$(S --topic "BA copy for the Activate disclaimer" --in-ticket y --reversible y
 e=$(S --topic "also push realtime to every viewer (scope C)" --in-ticket n --reversible y --external n --security n --needs-human n)
 [ "$a|$b|$c|$d|$e" = "DECIDE|DECIDE|DECIDE|ASSUME ASSUMED_PLACEHOLDER|ESCALATE OUT_OF_SCOPE" ] || { echo "FAIL: 8991 replay: $a|$b|$c|$d|$e"; exit 1; }
 jq -s -e '[.[]|select(.type=="gate")]|length==5 and ([.[]|select(.verdict=="ESCALATE")]|length)==1' .team-log/s8991/events.ndjson >/dev/null || { echo "FAIL: 8991 replay log"; echo "CURRENT=$(cat .team-log/CURRENT 2>/dev/null)"; ls .team-log; echo "-- where did 'remove snapshot' go:"; grep -rl "remove snapshot" .team-log | head; jq -c '[.feature,.type,.verdict,.body]' .team-log/s8991/events.ndjson 2>&1 | head -12; exit 1; }
+# ---- v0.1.15: baseline event + team-cores ----
+rm -rf .team-log/bl; "$B/team-log" feature_start --feature bl --body x
+! "$B/team-log" baseline --body "no verdict" 2>/dev/null || { echo "FAIL: baseline without --verdict accepted"; exit 1; }
+! "$B/team-log" baseline --verdict RED 2>/dev/null || { echo "FAIL: baseline without --body accepted"; exit 1; }
+"$B/team-log" baseline --verdict RED --body "abc123; pytest -n 2; red: e2e/knowledge-pack.spec.ts"
+jq -s -e '[.[]|select(.type=="baseline" and .verdict=="RED")]|length==1' .team-log/bl/events.ndjson >/dev/null || { echo "FAIL: baseline event"; exit 1; }
+"$B/team-tui" --dump bl | grep -q "RED" || { echo "FAIL: tui baseline verdict"; exit 1; }
+M '{"hook_event_name":"PreToolUse","cwd":"'"$T"'","tool_name":"Agent","tool_input":{"subagent_type":"agent-team:backend","description":"r2","prompt":"fix","model":"opus"}}'
+M '{"hook_event_name":"PreToolUse","cwd":"'"$T"'","tool_name":"Agent","tool_input":{"subagent_type":"agent-team:qa","description":"base","prompt":"baseline"}}'
+jq -s -e '[.[]|select(.type=="task_assigned")|.model] == ["opus","sonnet"]' .team-log/bl/events.ndjson >/dev/null || { echo "FAIL: model override / default: $(jq -c 'select(.type=="task_assigned")|.model' .team-log/bl/events.ndjson)"; exit 1; }
+"$B/team-tui" --query "select model from events where feature='bl' and type='task_assigned'" | grep -q opus || { echo "FAIL: model not in the index"; exit 1; }
+C() { TEAM_NPROC=$1 TEAM_LOAD=$2 "$B/team-cores"; }
+r="$(C 4 0) $(C 4 0.2) $(C 4 1.5) $(C 4 9) $(C 1 0) $(C 2 5) $(C 16 2.0)"
+[ "$r" = "4 3 2 2 1 2 14" ] || { echo "FAIL: team-cores: $r"; exit 1; }
+w=$("$B/team-cores"); [ "$w" -ge 1 ] && [ "$w" -le "$(nproc)" ] || { echo "FAIL: team-cores on this box: $w"; exit 1; }
 unset TEAM_HOOK_RETRIES
 echo PASS

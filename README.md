@@ -32,6 +32,25 @@ questions that truly need you (recommended option first).
   `skills/team-lead/references/`. The planner now returns `OPEN_QUESTIONS` (each with `blocking`, recommendation, default) and `ASSUMPTIONS`.
 - `team-report` ends with the gate verdict counts and decisions by decider, so `team-retro` can measure how often the user was needed.
 
+## Baseline, verify, PR (v0.1.15)
+- **Baseline before the first edit.** `qa` runs the repo's verify suite + the tests the plan names on the untouched base and writes
+  `.team-log/<feature>/baseline.md`; the master logs `baseline --verdict CLEAN|RED`. A check already red on the base is **not** the
+  ticket's failure: qa/reviewer tag every red check `NEW` or `BASELINE`, only `NEW` enters the fix loop. A red base is fixed as a
+  separate `B<n>` task when it is reversible, local and not security (one round, `decided_by policy`), and reported once at the end.
+- **Verify before PR.** The repo's verify suite (`.claude/skills/verify/SKILL.md`, `.claude/commands/verify.md`, or a Makefile/CLAUDE.md
+  target) must pass before the end question; then the repo's PR rules (e.g. `pr-doc`). ONE `AskUserQuestion` carries the end report
+  (incl. Baseline) and `Commit + push + draft PR` / `Commit only` / `Stop`.
+- **`bin/team-cores`** prints the worker count for parallel runners now: `nproc - ceil(1-min load)`, min 2, max nproc. Briefs pass it to
+  pytest `-n`, vitest `--maxWorkers`, playwright `--workers` instead of `auto`, which ignores other load on the box.
+  Rules: `skills/team-lead/references/baseline-and-verify.md`.
+
+## Models (v0.1.16)
+Each agent file pins its model: `planner`, `reviewer` = **opus** (a wrong contract or a weak review costs the whole run);
+`backend`, `frontend`, `qa`, `designer` = **sonnet** (bounded work on a frozen contract). The master is your session (`/model`, Opus).
+The master may only raise a model per dispatch (size L, R2 diagnosis, re-dispatch after a failed R1), never lower one
+(`skills/team-lead/references/triage.md`). The hook stamps the model on every `task_assigned`; `team.db` has a `model` column so
+`team-retro` can compare outcomes per model. `tests/test_skills.sh` fails if an agent's `model:` drifts from that table.
+
 ## Naming: ticket number first
 A feature that tracks a ticket is named `<type>-<ticket>-<title-slug>` (e.g. `bug-8991-fe-serving-activate-version-moi-ghi-de-admin-layout`)
 and `team-tui` shows it as `[bug-8991] <title>`, so tickets are easy to scan and pick. Older logs without metadata are labelled from the

@@ -11,7 +11,7 @@ user answer. You log the rest — gates, decisions, notes, findings — via `tea
 otherwise `${CLAUDE_PLUGIN_ROOT}/bin/`).
 
 Detail lives in `references/` (read when you reach that step, not up front):
-`triage.md` · `decision-policy.md` · `delegation-brief.md` · `escalation-ladder.md`. A short **policy card** is re-injected by the
+`triage.md` · `decision-policy.md` · `delegation-brief.md` · `escalation-ladder.md` · `baseline-and-verify.md`. A short **policy card** is re-injected by the
 hook after a compaction and every few prompts: treat it as authoritative and re-read the references it names.
 
 ## 0. Start
@@ -24,7 +24,8 @@ hook after a compaction and every few prompts: treat it as authoritative and re-
    Never pass `--feature` for a ticket. **Non-ticket work:** `team-log feature_start --feature <kebab-slug> --body "<request, verbatim>"`.
 2. Check once with `team-report | head`: the feature exists with the right type/title; else log `ticket_info` yourself.
 3. **Read the repo's facts yourself** (CLAUDE.md, `.claude/rules/`, Makefile/package.json): build/test commands, branch rules, test
-   tiers. Do not ask the user what these files answer.
+   tiers. Do not ask the user what these files answer. Find the repo's **verify suite** (`references/baseline-and-verify.md`)
+   and log which one it is as a `note`.
 4. **Triage** (`references/triage.md`): size S/M/L, which agents are needed, how many user gates. Log it as a `note`.
 
 ## 1. Plan
@@ -37,6 +38,10 @@ The planner returns tasks, a frozen contract, and `OPEN_QUESTIONS` (each with re
 3. Log: `team-log decision --from master --decided-by user --body "plan approved" --rationale "<their words / why this split>"`.
 
 ## 2. Build
+**Baseline first** (`references/baseline-and-verify.md`): once the workspace exists and before any builder edits, `qa` runs the
+verify suite + the tests the plan names on the untouched base with `team-cores` workers, writes `baseline.md`, and you log
+`baseline`. Red on the base is not the ticket's failure: fix it as a separate `B<n>` task if the limits allow (no question, policy),
+otherwise note it. Either way it is reported once, at the end.
 Order: designer (only if UI states are new) → backend and frontend in parallel on the frozen contract.
 Every dispatch follows the delegation brief (objective, read-first paths, territory, NOT-list, acceptance, evidence, negative-OK,
 autonomy, budget). Parallel builders MUST NOT touch the same files; if territories overlap, serialize.
@@ -54,14 +59,20 @@ SAME agent with `SendMessage`. A 3rd round for one agent+task is refused by the 
 and tell the user what is unclear.
 
 ## 4. Verify
-`qa` (against a live stack URL if one exists), then `reviewer` on the full diff. Do not trust replies: read the evidence (command, exit
+`qa` (against a live stack URL if one exists), then `reviewer` on the full diff. Both tag every red check `NEW` or `BASELINE`
+against `baseline.md`; only `NEW` enters the fix loop. Do not trust replies: read the evidence (command, exit
 code, pass/fail counts) and check builders stayed inside their territory (`references/delegation-brief.md`).
 Each finding: `team-log review_finding --from reviewer --body "<sev | file:line | issue>"`.
 Blockers climb `references/escalation-ladder.md` (R1 builder → R2 diagnosis → R3 ask the user).
 
 ## 5. Close
-`team-report` prints the timeline with gate and decided-by counts. Summarise to the user: what was built, what you decided, what the
-user decided, assumptions still open. Run `team-log feature_end` (stops capture of the main thread), then suggest `/agent-team:team-retro`.
+1. **Verify before PR**: `qa` runs the repo's full verify suite with `team-cores` workers. It must PASS (red allowed only on
+   `BASELINE` checks left unfixed); a `NEW` red goes back up the escalation ladder. Then follow the repo's PR rules (e.g. `pr-doc`).
+2. `team-report` for the gate and decided-by counts.
+3. ONE `AskUserQuestion` with the end report — built, decided by you, decided by the user, open assumptions, **Baseline**
+   (fixed / still red + why), verify evidence — and the choice `Commit + push + draft PR` / `Commit only` / `Stop`.
+4. On approval: commit, push, draft PR, `note` with the PR URL. Then `team-log feature_end` (stops capture of the main thread)
+   and suggest `/agent-team:team-retro`.
 
 ## Logging contract
 **Automatic (hook — do NOT log by hand, it would duplicate):** `agent_started`, `question`, `worker_done` (FULL final report),
@@ -71,6 +82,7 @@ report is also saved to `plan.md`.
 
 **Yours:**
 - `gate` — written by `team-gate` itself, one per open question.
+- `baseline --verdict CLEAN|RED --body "<base sha; commands; red ids>"` — once, before the first builder edit.
 - `decision --from master [--to <agent>] --decided-by master|user|policy --body ... --rationale "<why, what was rejected>"` — every decision, yours or the user's.
 - `note --from master --body ...` (triage, plan changes, a check you ran, a user message the hook cannot see), `review_finding`,
   `stack_provisioned`, `feature_end`.

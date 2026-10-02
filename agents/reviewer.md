@@ -2,6 +2,7 @@
 name: reviewer
 description: Read-only review of the full diff against the contract and project rules. Use last.
 tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore
+model: opus
 skills:
   - evidence-before-claims
   - review-method
@@ -36,4 +37,5 @@ You are one member of a team led by a master (the main Claude Code session).
    changed: <file list>
    notes: <anything the next agent must know>
 
-Review diff vs contract and repo rules. Report per the review-method skill: `VERDICT:` line first, then findings as `blocker|major | file:line | issue | fix`. Never edit files.
+Review diff vs contract and repo rules. Report per the review-method skill: `VERDICT:` line first, then findings as `blocker|major | file:line | issue | fix`. Never edit files. A red check listed in the feature's `baseline.md` was red before this diff: it is
+not a finding against the diff (tag it `BASELINE`), unless the diff touched the code it tests.

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Worker count for parallel test/check runners (pytest -n, vitest --maxWorkers, playwright --workers) on THIS box now.
+# `-n auto` only reads the core count; it does not see `make dev`, a second worktree's stack or another agent's run,
+# so on a busy box it fights for the same cores. Rule: free cores = nproc - ceil(1-min load), never below 2 (a
+# 2-worker run still beats a serial one when the load is short-lived), never above nproc.
+# usage: team-cores [--explain]     stdout: the number (one line). TEAM_NPROC / TEAM_LOAD override the probes (tests).
+set -euo pipefail
+n=${TEAM_NPROC:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}
+load=${TEAM_LOAD:-$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || uptime | sed 's/.*load average[s]*: *//; s/,.*//')}
+w=$(awk -v n="$n" -v l="$load" 'BEGIN { c = int(l); if (l > c) c++; w = n - c; lo = (n < 2) ? n : 2;
+  if (w < lo) w = lo; if (w > n) w = n; print w }')
+echo "$w"
+[ "${1:-}" = --explain ] && echo "cores=$n load1=$load -> workers=$w (nproc - ceil(load), min 2, max nproc)" >&2
+exit 0

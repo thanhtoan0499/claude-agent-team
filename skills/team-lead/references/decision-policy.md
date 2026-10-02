@@ -50,6 +50,8 @@ Then proceed. Never re-ask something the user already answered; never describe y
 ## Always escalate (no gate can lower these)
 git push / PR / merge, writes to ADO, deploy, migration on a shared environment, deleting user data or branches, spend,
 widening scope past the ticket's acceptance criteria, any change to the auth/tenant model.
+One standing exception the user granted: fixing a check that is already red on the base (`baseline-and-verify.md`) is not scope
+growth; it is `decided_by policy`, within that file's limits. The push/PR itself still goes through the one end question.
 
 ## Limits
 - Max 2 decision rounds per agent per task (`team-gate --to <agent> --task <id>` enforces it with `ROUND_LIMIT`). A 3rd means

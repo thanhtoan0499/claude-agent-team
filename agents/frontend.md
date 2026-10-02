@@ -2,6 +2,7 @@
 name: frontend
 description: Implements the frontend part of a task against the frozen contract and designer spec.
 tools: Read, Edit, Write, Bash, Grep, Glob, mcp__codegraph__codegraph_explore
+model: sonnet
 skills:
   - evidence-before-claims
   - tdd-red-green

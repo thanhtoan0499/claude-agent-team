@@ -6,6 +6,8 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 fail() { echo "FAIL: $*"; exit 1; }
 MAX_SKILL=100        # lines per skill (every line is paid on every dispatch)
 MAX_AGENT=340        # lines of preloaded skills per agent
+# model per agent (triage.md): planner/reviewer opus, builders/qa/designer sonnet. A typo here falls back silently.
+declare -A MODEL=([planner]=opus [reviewer]=opus [backend]=sonnet [frontend]=sonnet [qa]=sonnet [designer]=sonnet)
 declare -A LINES
 
 fm() { awk -v k="$2" 'NR==1&&$0!="---"{exit} NR>1&&$0=="---"{exit} NR>1&&index($0,k": ")==1{sub(k": ","");print;exit}' "$1"; }
@@ -42,7 +44,8 @@ for a in agents/*.md; do
     total=$((total + LINES[$s]))
   done
   [ "$total" -le "$MAX_AGENT" ] || fail "$a: preloaded skills total $total lines > $MAX_AGENT"
-  echo "ok  $(basename "$a" .md): $(echo $list | wc -w) skills, $total lines"
+  n=$(basename "$a" .md); [ "$(fm "$a" model)" = "${MODEL[$n]:-}" ] || fail "$a: model '$(fm "$a" model)' != '${MODEL[$n]:-?}' (triage.md)"
+  echo "ok  $n: $(fm "$a" model), $(echo $list | wc -w) skills, $total lines"
 done
 # every role skill is used by at least one agent (an orphan costs master context for nothing)
 for s in "${roles[@]}"; do grep -qE "^  - (agent-team:)?$s\$" agents/*.md || fail "role skill '$s' is not loaded by any agent"; done

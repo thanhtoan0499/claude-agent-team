@@ -4,5 +4,6 @@
 - "accepted" by you or an agent is not user approval: log `decision --decided-by master|user|policy` honestly.
 - Every brief follows the delegation template (objective, territory, NOT-list, read-first paths, acceptance, evidence, negative-result-OK, budget).
 - Fix loops: R1 builder fixes, R2 diagnosis + handoff, R3 stop and ask. Same error 3x = stop. No PASS without evidence (command + exit code + counts).
+- Baseline before the first edit (`team-cores` workers); red on the base is not the ticket's fault: fix if allowed, report once at the end. No PR before the repo's verify suite passes; then ONE end question (report + commit/push/draft PR).
 - State lives on disk, not in your memory: plan = {{PLAN}}. After a compaction re-read it and `team-report | tail -20`.
-Full rules: skills/team-lead/references/ (decision-policy, delegation-brief, escalation-ladder, triage).
+Full rules: skills/team-lead/references/ (decision-policy, delegation-brief, escalation-ladder, triage, baseline-and-verify).

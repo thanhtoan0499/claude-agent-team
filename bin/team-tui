@@ -61,10 +61,10 @@ def open_db(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     con = sqlite3.connect(path); con.row_factory = sqlite3.Row
     cols = [r[1] for r in con.execute("pragma table_info(events)")]
-    if cols and "plugin_version" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
+    if cols and "model" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
     con.execute("""create table if not exists events(src text, repo text, feature text, line int, ts text, type text,
         frm text, dst text, task text, body text, rationale text, options text, agent_id text, ticket text, ttype text,
-        title text, decided_by text, verdict text, codes text, plugin_version text,
+        title text, decided_by text, verdict text, codes text, plugin_version text, model text,
         primary key(src, feature, line))""")
     con.execute("create index if not exists ev_type on events(type)")
     return con
@@ -108,11 +108,11 @@ def sync(con, srcs):
                     except ValueError:
                         if not whole: break  # half-written tail: pick it up once the writer finishes it
                         n += 1; off += len(raw); continue  # garbled line: skip, keep numbering
-                    new += con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    new += con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (src, repo, feat, n + 1, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
                          e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id"),
                          e.get("ticket"), e.get("ticket_type"), e.get("title"),
-                         e.get("decided_by"), e.get("verdict"), e.get("codes"), e.get("plugin_version"))).rowcount
+                         e.get("decided_by"), e.get("verdict"), e.get("codes"), e.get("plugin_version"), e.get("model"))).rowcount
                     if not whole: break  # complete JSON but no newline yet: keep it, re-read (and ignore the duplicate) later
                     n += 1; off += len(raw)
             _seen[f] = (n, off)
@@ -139,10 +139,10 @@ def mmss(sec): return f"{int(sec)//60:02d}:{int(sec)%60:02d}"
 
 ICON = {"feature_start": "▶", "task_assigned": "→", "question": "?", "decision": "✔", "agent_started": "·",
         "worker_done": "■", "review_finding": "!", "stack_provisioned": "◆", "note": "·",
-        "escalation": "⇧", "user_reply": "↩", "error": "✖", "tool_call": "·", "feature_end": "■", "ticket_info": "#", "gate": "⚖"}
+        "escalation": "⇧", "user_reply": "↩", "error": "✖", "tool_call": "·", "feature_end": "■", "ticket_info": "#", "gate": "⚖", "baseline": "◇"}
 COLOR = {"question": 3, "decision": 2, "review_finding": 1, "task_assigned": 6, "worker_done": 4, "feature_start": 5,
-         "escalation": 3, "user_reply": 5, "error": 1, "gate": 3}
-QA = {"question", "decision", "review_finding", "escalation", "user_reply", "error", "gate"}
+         "escalation": 3, "user_reply": 5, "error": 1, "gate": 3, "baseline": 3}
+QA = {"question", "decision", "review_finding", "escalation", "user_reply", "error", "gate", "baseline"}
 
 BODY_PREVIEW = 20  # wrapped lines of one body shown before it collapses to "… +N more lines" (o expands, O expands all)
 

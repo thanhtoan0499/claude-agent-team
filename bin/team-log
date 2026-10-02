@@ -2,10 +2,12 @@
 # Append one structured event to the feature's events.ndjson.
 # usage: team-log <type> [--from A] [--to B] [--task T] [--body TEXT] [--rationale TEXT] [--options "a|b"] [--agent-id ID] [--ref PATH] [--feature F]
 #        [--ticket N] [--type bug|task|us|...] [--title TEXT]   (ticket metadata, see naming rule below)
+#        [--model M]   (task_assigned: the model the agent runs on, so a retro can compare models)
 # types: feature_start task_assigned question decision worker_done review_finding stack_provisioned agent_started note
 #        escalation (master -> user)  user_reply (user -> master, verbatim)  error  tool_call  feature_end
 #        ticket_info (ticket type/title, latest wins; usually written by team-ticket or the master)
 #        gate (a team-gate verdict: --verdict DECIDE|ASSUME|ESCALATE --codes OUT_OF_SCOPE,... --body <topic>)
+#        baseline (checks on the untouched base, before any edit: --verdict CLEAN|RED --body <summary; red check ids>)
 # decision also takes --decided-by master|user|policy (default master): who actually made the call. An agent's or
 #   the master's "accepted" is never a user approval; only decided_by=user means the user chose.
 # NAMING RULE: a feature that tracks a ticket is named  <type>-<ticket>-<title-slug>  (ticket number FIRST, e.g.
@@ -17,16 +19,16 @@
 set -euo pipefail
 . "$(dirname "$0")/_lib.sh"
 type="${1:-}"; [ -n "$type" ] || { echo "usage: team-log <type> [flags]" >&2; exit 2; }; shift
-from= to= task= body= rationale= options= feature= agent_id= ref= ticket= ttype= title= decided_by= verdict= codes=
+from= to= task= body= rationale= options= feature= agent_id= ref= ticket= ttype= title= decided_by= verdict= codes= model=
 while [ $# -gt 0 ]; do
   case "$1" in
     --from) from=$2;; --to) to=$2;; --task) task=$2;; --body) body=$2;;
-    --rationale) rationale=$2;; --options) options=$2;; --feature) feature=$2;; --agent-id) agent_id=$2;; --ref) ref=$2;; --ticket) ticket=$2;; --type) ttype=$2;; --title) title=$2;; --decided-by) decided_by=$2;; --verdict) verdict=$2;; --codes) codes=$2;;
+    --rationale) rationale=$2;; --options) options=$2;; --feature) feature=$2;; --agent-id) agent_id=$2;; --ref) ref=$2;; --ticket) ticket=$2;; --type) ttype=$2;; --title) title=$2;; --decided-by) decided_by=$2;; --verdict) verdict=$2;; --codes) codes=$2;; --model) model=$2;;
     *) echo "unknown flag $1" >&2; exit 2;;
   esac; shift 2 || { echo "flag needs a value" >&2; exit 2; }
 done
 case "$type" in
-  feature_start|task_assigned|question|decision|worker_done|review_finding|stack_provisioned|agent_started|note|escalation|user_reply|error|tool_call|feature_end|ticket_info|gate) ;;
+  feature_start|task_assigned|question|decision|worker_done|review_finding|stack_provisioned|agent_started|note|escalation|user_reply|error|tool_call|feature_end|ticket_info|gate|baseline) ;;
   *) echo "bad type: $type" >&2; exit 2;;
 esac
 [ "$type" = question ] && { [ -n "$from" ] && [ -n "$body" ] || { echo "question needs --from and --body" >&2; exit 2; }; }
@@ -40,6 +42,10 @@ case "$decided_by" in ""|master|user|policy) ;; *) echo "--decided-by must be ma
 if [ "$type" = gate ]; then
   case "$verdict" in DECIDE|ASSUME|ESCALATE) ;; *) echo "gate needs --verdict DECIDE|ASSUME|ESCALATE" >&2; exit 2;; esac
   [ -n "$body" ] || { echo "gate needs --body (the topic)" >&2; exit 2; }
+fi
+if [ "$type" = baseline ]; then
+  case "$verdict" in CLEAN|RED) ;; *) echo "baseline needs --verdict CLEAN|RED" >&2; exit 2;; esac
+  [ -n "$body" ] || { echo "baseline needs --body (what ran; the red check ids)" >&2; exit 2; }
 fi
 [ "$type" = ticket_info ] && { [ -n "$ticket" ] || { echo "ticket_info needs --ticket" >&2; exit 2; }; }
 start=
@@ -61,8 +67,8 @@ ver=$(team_version)
 ts=$(date -u +%FT%T.%3NZ); case "$ts" in *N*) ts=$(date -u +%FT%TZ);; esac   # ms where GNU date allows, else seconds
 line=$(jq -cn --arg ts "$ts" --arg feature "$(team_feature)" --arg type "$type" \
   --arg from "$from" --arg to "$to" --arg task "$task" --arg body "$body" \
-  --arg rationale "$rationale" --arg options "$options" --arg agent_id "$agent_id" --arg ref "$ref" --arg ticket "$ticket" --arg ttype "$ttype" --arg title "$title" --arg decided_by "$decided_by" --arg verdict "$verdict" --arg codes "$codes" --arg plugin_version "$ver" \
-  '{ts:$ts,feature:$feature,type:$type,from:$from,to:$to,task:$task,body:$body,rationale:$rationale,options:($options|split("|")|map(select(length>0))),agent_id:$agent_id,ref:$ref,ticket:$ticket,ticket_type:$ttype,title:$title,decided_by:$decided_by,verdict:$verdict,codes:$codes,plugin_version:$plugin_version}
+  --arg rationale "$rationale" --arg options "$options" --arg agent_id "$agent_id" --arg ref "$ref" --arg ticket "$ticket" --arg ttype "$ttype" --arg title "$title" --arg decided_by "$decided_by" --arg verdict "$verdict" --arg codes "$codes" --arg model "$model" --arg plugin_version "$ver" \
+  '{ts:$ts,feature:$feature,type:$type,from:$from,to:$to,task:$task,body:$body,rationale:$rationale,options:($options|split("|")|map(select(length>0))),agent_id:$agent_id,ref:$ref,ticket:$ticket,ticket_type:$ttype,title:$title,decided_by:$decided_by,verdict:$verdict,codes:$codes,model:$model,plugin_version:$plugin_version}
    | with_entries(select(.value != "" and .value != []))')
 # One event = one line, appended under an exclusive lock. Without it, parallel agents writing bodies larger than
 # the pipe/stdio buffer (~4 KB) interleave and corrupt the NDJSON (measured: 24 writers x 30 KB -> 11 bad lines).

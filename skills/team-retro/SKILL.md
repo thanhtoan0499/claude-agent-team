@@ -17,7 +17,7 @@ description: Analyse the team log of one ticket, or of ALL tickets and repos, to
 ## Across tickets and repos (the shared index)
 
 Every repo's log is indexed in `~/.claude/agent-team/team.db` (table `events`: src, repo, feature, line, ts, type, frm, dst,
-task, body, rationale, options, agent_id, ticket, ttype, title, decided_by, verdict, codes, plugin_version). Query it with
+task, body, rationale, options, agent_id, ticket, ttype, title, decided_by, verdict, codes, plugin_version, model). Query it with
 `team-tui --query "<SQL>"` (read-only, tab-separated; works from any directory). Events written before 0.1.13 have no
 `plugin_version`. Use this when one ticket is too small a sample to justify a prompt change (3+ tickets showing the same thing).
 

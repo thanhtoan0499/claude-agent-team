@@ -2,6 +2,7 @@
 name: backend
 description: Implements the backend part of a task inside the contract the planner froze. Use after planner.
 tools: Read, Edit, Write, Bash, Grep, Glob, mcp__codegraph__codegraph_explore
+model: sonnet
 skills:
   - evidence-before-claims
   - tdd-red-green

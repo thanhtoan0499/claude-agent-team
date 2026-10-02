@@ -186,7 +186,12 @@ master_event() {
       to=$(J '.tool_input.subagent_type // "general-purpose"')
       desc=$(J '.tool_input.description // empty')
       body=$(J '.tool_input.prompt // empty')
-      [ -n "$body" ] && log task_assigned --from master --to "$to" --task "$desc" --body "${body:0:$MAX}" ;;
+      # Model the agent will run on: the master's per-dispatch override, else the agent file's `model:`, else inherited.
+      model=$(J '.tool_input.model // empty')
+      if [ -z "$model" ]; then
+        case "$to" in agent-team:*) model=$(sed -n '2,/^---$/s/^model: *//p' "$DIR/../agents/${to#agent-team:}.md" 2>/dev/null | head -1);; esac
+      fi
+      [ -n "$body" ] && log task_assigned --from master --to "$to" --task "$desc" --model "${model:-inherit}" --body "${body:0:$MAX}" ;;
     PreToolUse:SendMessage)
       to=$(J '.tool_input.to // empty')
       body=$(J '(.tool_input.message // empty) | if type=="string" then . else tojson end')

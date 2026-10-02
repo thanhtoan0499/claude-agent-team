@@ -18,6 +18,10 @@ EVIDENCE:       what you must return so I can act without re-checking — file:l
 NEGATIVE OK:    "If the premise is wrong, the test cannot fail for the stated reason, or the fix does not work, say so plainly. A red,
                 honest result is worth more than a green one that is not real."
 AUTONOMY:       decide yourself (reversible, inside TERRITORY, no new contract): <examples>. Return NEEDS_DECISION for: <examples>
+RUN:            workers = <team-cores output> for pytest -n / vitest --maxWorkers / playwright --workers; one command per Bash
+                call (`uv run --directory d ...`, `pnpm --dir d ...`, not `cd d && ...`); stop a server by port (`fuser -k 5199/tcp`),
+                never `pkill -f "<its own command line>"` (it matches and kills your own shell: exit 144)
+BASELINE:       <abs path>/.team-log/<feature>/baseline.md — red checks listed there are not yours; tag every red check NEW|BASELINE
 BUDGET:         max 8 iterations; same error 3 times -> stop and report what you tried, what failed, what is ruled out
 ```
 
