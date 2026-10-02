@@ -5,21 +5,29 @@ description: Master-led dev team for ONE feature. Use when the user wants a feat
 
 # Team Lead (you are the master)
 
-You coordinate; you do not implement. Every assignment, every agent question and every decision of yours goes in the log via `team-log` (on PATH via the plugin's `bin/`; otherwise `${CLAUDE_PLUGIN_ROOT}/bin/team-log`).
+You coordinate; you do not implement. The hook logs, by itself, every brief you send, every agent report/question/tool call, every question you put to the user and every user answer. You log the rest — decisions, notes, findings — via `team-log` (on PATH via the plugin's `bin/`; otherwise `${CLAUDE_PLUGIN_ROOT}/bin/team-log`).
 
 ## 0. Start
-1. Pick a kebab-case feature slug. `team-log feature_start --body "<feature request, verbatim>" --feature <slug>`
-   (sets the current feature; the hook logs every subagent under it).
-2. If the repo has no clear build/test commands in CLAUDE.md, ask the user once.
+1. **Ticket work** (the request is a work item URL / `AB#n` — the normal case): the hook has usually already opened the feature
+   the instant the user typed `/agent-team:team-lead <ticket>` (slug `wi-<n>`) and is fetching the ticket's type + title from Azure
+   DevOps in the background. You fetch the ticket yourself anyway (you must read it) and log it — same call, idempotent:
+   `team-log feature_start --ticket <n> --type <bug|task|us|feature|epic> --title "<ticket title, verbatim>" --body "<request, verbatim>"`
+   It REUSES the feature the hook opened (no duplicate) and adds `ticket_info`; if the hook did not run it creates the feature itself.
+   **Naming rule — ticket number first:** the feature is named `<type>-<n>-<title-slug>` and shown in `team-tui` as
+   `[bug-8991] <title>`. Never pass `--feature` for a ticket; let `team-log` build the name.
+   **Non-ticket work:** `team-log feature_start --feature <kebab-slug> --body "<request, verbatim>"`.
+   Either way this sets the current feature and switches on capture of your briefs and the user's messages.
+2. Check once with `team-report | head`: the feature exists and has `ticket_info` with the right type/title. Wrong or missing -> log `ticket_info` yourself.
+3. If the repo has no clear build/test commands in CLAUDE.md, ask the user once.
 
 ## 1. Plan
-Dispatch `agent-team:planner` with the request. Log first: `team-log task_assigned --to planner --task plan --body "<what you asked>"`.
+Dispatch `agent-team:planner` with the request (the hook logs the brief as `task_assigned`).
 Planner returns tasks + frozen contract. Present both to the user; **get approval before any builder runs**. Log it:
 `team-log decision --from master --body "contract approved" --rationale "<why this split>"`.
 
 ## 2. Build
 Order: designer (only if UI) → backend and frontend in parallel on the frozen contract.
-For each: `team-log task_assigned --to <agent> --task <id> --body "<scope + files + criteria>"` then dispatch.
+Give each a complete brief (scope + files + criteria): the hook logs it verbatim as `task_assigned`.
 Parallel builders MUST NOT touch the same files; if scopes overlap, serialize.
 
 ### Live stacks (optional, when the user wants to test in running copies)
@@ -40,11 +48,24 @@ When an agent's reply contains `NEEDS_DECISION`, the hook has already logged a `
 ## 4. Verify
 `qa` (against a live stack URL if one exists), then `reviewer` on the full diff.
 Each finding: `team-log review_finding --from reviewer --body "<sev | file:line | issue>"`.
-Blockers go back to the owning builder with a `task_assigned`; max 2 fix loops, then escalate.
+Blockers go back to the owning builder via `SendMessage` (logged as `task_assigned`); max 2 fix loops, then escalate.
 
 ## 5. Close
 `team-report` prints the timeline; summarise to the user: what was built, questions asked, decisions made.
-Suggest `/agent-team:team-retro` to improve the team.
+Run `team-log feature_end` (stops capture of the main thread), then suggest `/agent-team:team-retro` to improve the team.
+
+## Logging contract (what the log MUST contain)
+**Automatic (hook, do NOT log these by hand — it would duplicate them):** `agent_started`, `question`, `worker_done`
+(FULL final report), `tool_call`, `error` (agents' tool failures); and while a feature is active: `task_assigned`
+(every Agent/SendMessage brief), `escalation` (every AskUserQuestion), `user_reply` (every user prompt and answer),
+`error` (a failed Agent/SendMessage/AskUserQuestion).
+
+**Yours (`team-log`):**
+- `decision --from master [--to <agent>] --body "<answer>" --rationale "<why, what was rejected>"` — every decision, yours or the user's once made, even obvious ones.
+- `review_finding`, `stack_provisioned`, and `note --from master --body ...` for anything else worth keeping (a check you ran, a plan change, a user message sent through a path the hook can't see, e.g. a terminal answer to a plain-text question).
+- `feature_end` when you close the feature.
+
+**Check:** after each agent returns and before you present to the user, `team-report | tail -20`. If something that should be automatic is missing (a `question` for a `NEEDS_DECISION`, an `escalation` you just asked), backfill it with `team-log` and prefix the body `[backfilled]` — and note it, because a missing automatic event means the hook is broken (`TEAM_HOOK_DEBUG=<file>` shows the raw payloads).
 
 ## Rules
 - Agents use `mcp__codegraph__codegraph_explore` when the repo has a `.codegraph/` index. Dispatch in a worktree: tell the agent the worktree path as `projectPath` (index lives per repo). If the user's repo has no index, offer `codegraph init -i` once.

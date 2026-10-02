@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# usage: team-ticket <ticket-number> [work-item-url]
+# Fetch the ticket's type + title from Azure DevOps (`az boards`) and log them as `ticket_info` on the feature
+# that tracks it. Best effort and silent: no az / no auth / no network -> exit 0, the master logs the same
+# metadata itself. Spawned in the background by team-hook so the user's prompt is never delayed.
+# Org: taken from the URL, else $TEAM_ADO_ORG (e.g. https://dev.azure.com/myorg), else az's configured default.
+DIR=$(cd "$(dirname "$0")" && pwd)
+id=${1:-}; url=${2:-}
+case "$id" in ""|*[!0-9]*) exit 0 ;; esac
+command -v az >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || exit 0
+org=${TEAM_ADO_ORG:-}
+[ -n "$url" ] && org=$(sed -E 's#^(https://dev\.azure\.com/[^/]+).*#\1#' <<<"$url")
+args=(boards work-item show --id "$id" -o json); [ -n "$org" ] && args+=(--org "$org")
+if command -v timeout >/dev/null 2>&1; then json=$(timeout 20 az "${args[@]}" 2>/dev/null) || exit 0
+else json=$(az "${args[@]}" 2>/dev/null) || exit 0; fi
+wtype=$(jq -r '.fields["System.WorkItemType"] // empty' <<<"$json")
+title=$(jq -r '.fields["System.Title"] // empty' <<<"$json")
+[ -n "$title" ] || exit 0
+case "$wtype" in
+  Bug) t=bug ;; Task) t=task ;; "User Story") t=us ;; Feature) t=feature ;; Epic) t=epic ;; Issue) t=issue ;;
+  "Product Backlog Item") t=pbi ;; "") t= ;; *) t=$(tr '[:upper:] ' '[:lower:]-' <<<"$wtype") ;;
+esac
+exec "$DIR/team-log" ticket_info --from team-ticket --ticket "$id" ${t:+--type "$t"} --title "$title" ${url:+--ref "$url"}

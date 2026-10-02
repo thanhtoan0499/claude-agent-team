@@ -5,10 +5,12 @@ set -euo pipefail
 [ -n "${1:-}" ] && export TEAM_FEATURE=$1
 f=$(team_log_file); [ -s "$f" ] || { echo "no events: $f" >&2; exit 1; }
 jq -r '
+  if .type == "tool_call" then "\(.ts[11:19]) [tool_call] \(.from // ""): \((.body // "") | gsub("\n";" ") | .[0:200])" else
   "\(.ts[11:19]) [\(.type)] " +
   (if .from and .to then "\(.from) -> \(.to)" elif .from then .from elif .to then "-> \(.to)" else "" end) +
   (if .task then " (\(.task))" else "" end) +
-  (if .body then "\n    \(.body | gsub("\n";" ") | .[0:300])" else "" end) +
+  (if .body then "\n    \(.body | gsub("\n";" ") | .[0:2000])" else "" end) +
   (if .options then "\n    options: \(.options|join(" | "))" else "" end) +
-  (if .rationale then "\n    WHY: \(.rationale)" else "" end)' "$f"
-echo "--- $(wc -l < "$f") events | questions: $(jq -s 'map(select(.type=="question"))|length' "$f") | decisions: $(jq -s 'map(select(.type=="decision"))|length' "$f")"
+  (if .rationale then "\n    WHY: \(.rationale)" else "" end) +
+  (if .ref then "\n    ref: \(.ref)" else "" end) end' "$f"
+echo "--- $(wc -l < "$f") events | questions: $(jq -s 'map(select(.type=="question"))|length' "$f") | decisions: $(jq -s 'map(select(.type=="decision"))|length' "$f") | escalations: $(jq -s 'map(select(.type=="escalation"))|length' "$f") | errors: $(jq -s 'map(select(.type=="error"))|length' "$f")"

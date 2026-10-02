@@ -18,14 +18,31 @@ Flow: `planner` (contract, you approve) → `designer` → `backend` ∥ `fronte
 Agents never guess: they end with `NEEDS_DECISION` (question + options + recommendation); the master answers
 with a **mandatory rationale** and resumes the same agent via `SendMessage`. Max 2 rounds, then escalate.
 
+## Naming: ticket number first
+A feature that tracks a ticket is named `<type>-<ticket>-<title-slug>` (e.g. `bug-8991-fe-serving-activate-version-moi-ghi-de-admin-layout`)
+and `team-tui` shows it as `[bug-8991] <title>`, so tickets are easy to scan and pick. Older logs without metadata are labelled from the
+number in their slug (`[8991] name`). `team-log feature_start --ticket N [--type T] [--title X]` builds the name and reuses the feature that
+already tracks ticket N.
+
+**Hook + agent in parallel:** typing `/agent-team:team-lead <ADO URL | AB#n>` makes the hook open the feature immediately (exact id, no LLM
+involved) and spawn `bin/team-ticket`, which fetches the type and title from Azure DevOps (`az boards`, ~2 s, detached so the prompt is never
+delayed; org from the URL or `TEAM_ADO_ORG`). Meanwhile the master reads the ticket and logs the same metadata (`ticket_info`); the TUI shows
+the latest. If `az` is missing or not logged in, the master's entry is the only source.
+
 ## Log
 `<repo>/.team-log/<feature>/events.ndjson`, one JSON per line. Worktrees share the main repo's log; the
 worktree name is the feature slug.
 
 | type | written by |
 |---|---|
-| `feature_start`, `task_assigned`, `decision`, `stack_provisioned`, `review_finding` | master via `team-log` |
-| `agent_started`, `worker_done`, `question` | `SubagentStart/Stop` hook (a `NEEDS_DECISION` reply becomes `question`) |
+| `feature_start`, `feature_end`, `ticket_info`, `decision`, `review_finding`, `stack_provisioned`, `note` | master via `team-log` |
+| `agent_started`, `worker_done`, `question` | `SubagentStart/Stop` hook. Body = the agent's FULL final report (read from the subagent transcript when the agent ends via `SubagentHandback`); a `NEEDS_DECISION` line makes it a `question`; `ref` = path of the agent's transcript |
+| `tool_call`, `error` | `PostToolUse` / `PostToolUseFailure` hook for agent-team agents (one line per call) |
+| `task_assigned` (master's brief), `escalation` (question to the user), `user_reply` (user prompt / answer), `error` (failed Agent/SendMessage/AskUserQuestion) | main-thread hooks (`PreToolUse` Agent/SendMessage/AskUserQuestion, `UserPromptSubmit`, `PostToolUse(Failure)`), **only while a feature is active**: `.team-log/CURRENT` set by `feature_start`, refreshed by every event, expires after 12 h idle, cleared by `feature_end` |
+
+Appends are serialised with `flock` (parallel agents with large bodies would otherwise interleave lines). Timestamps carry milliseconds where GNU `date` supports it.
+
+`TEAM_HOOK_DEBUG=/tmp/hook.ndjson` appends every raw hook payload to that file, for diagnosing a missing event.
 
 ```
 bin/team-tui                  # lazygit-style: left = tickets, Enter = timeline (agents, questions, decisions+WHY)

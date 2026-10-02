@@ -24,3 +24,26 @@ team_log_file() {
   dir="${TEAM_LOG_DIR:-$(team_root "$cwd")/.team-log}/$(team_feature "$cwd")"
   mkdir -p "$dir" && echo "$dir/events.ndjson"
 }
+
+# ASCII kebab slug of a title (Vietnamese diacritics folded, max 60 chars).
+team_slug() {
+  python3 - "$1" <<'PY'
+import re, sys, unicodedata
+s = sys.argv[1].replace("đ", "d").replace("Đ", "D")
+s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
+print(re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:60].rstrip("-"))
+PY
+}
+
+# Feature that already tracks ticket $1: the current one if it matches, else the most recently active whose slug
+# contains the ticket number as a whole token (bug-8991-x, wi-8991, x-8991). Empty if none.
+team_ticket_feature() {
+  local id=$1 cwd="${2:-$PWD}" root dir f d cur
+  root=$(team_root "$cwd"); dir="${TEAM_LOG_DIR:-$root/.team-log}"; cur="$root/.team-log/CURRENT"
+  if [ -s "$cur" ] && head -1 "$cur" | grep -qE "(^|-)${id}(-|\$)"; then head -1 "$cur"; return 0; fi
+  for f in $(ls -t "$dir"/*/events.ndjson 2>/dev/null); do
+    d=$(basename "$(dirname "$f")")
+    if grep -qE "(^|-)${id}(-|\$)" <<<"$d"; then echo "$d"; return 0; fi
+  done
+  return 0
+}

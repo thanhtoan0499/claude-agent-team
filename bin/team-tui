@@ -3,7 +3,7 @@
 NDJSON stays the source of truth; <log dir>/team.db (SQLite) is a derived index synced on every refresh.
 usage: team-tui            interactive (j/k move, enter open, f Q&A-only, G follow end, esc back, q quit)
        team-tui --dump [feature]   plain text, no curses (scripts/tests)"""
-import curses, glob, json, os, sqlite3, subprocess, sys, textwrap
+import curses, glob, json, os, re, sqlite3, subprocess, sys, textwrap
 from datetime import datetime, timezone
 
 def log_dir():
@@ -18,8 +18,11 @@ def log_dir():
 def open_db(d):
     os.makedirs(d, exist_ok=True)
     con = sqlite3.connect(os.path.join(d, "team.db")); con.row_factory = sqlite3.Row
+    cols = [r[1] for r in con.execute("pragma table_info(events)")]
+    if cols and "ticket" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
     con.execute("""create table if not exists events(feature text, line int, ts text, type text, frm text, dst text,
-        task text, body text, rationale text, options text, agent_id text, primary key(feature, line))""")
+        task text, body text, rationale text, options text, agent_id text, ticket text, ttype text, title text,
+        primary key(feature, line))""")
     return con
 
 def sync(con, d):  # append-only logs: ingest only lines beyond what the DB already has
@@ -31,27 +34,33 @@ def sync(con, d):  # append-only logs: ingest only lines beyond what the DB alre
                 if n <= done: continue
                 try: e = json.loads(raw)
                 except ValueError: continue  # torn/garbled line: skip, keep numbering
-                con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?)",
+                con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (feat, n, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
-                     e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id")))
+                     e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id"),
+                     e.get("ticket"), e.get("ticket_type"), e.get("title")))
     con.commit()
 
 def features(con):
     return con.execute("""select feature, min(ts) first, max(ts) last, count(*) n,
         sum(type='question') q, sum(type='decision') d, sum(type='review_finding') r,
         sum(type='agent_started') st, sum(type in ('worker_done','question') and agent_id is not null and agent_id!='') en,
-        (select body from events x where x.feature=e.feature and type='feature_start' limit 1) title
+        (select body from events x where x.feature=e.feature and type='feature_start' limit 1) request,
+        (select ticket from events x where x.feature=e.feature and x.ticket is not null and x.ticket!='' order by line desc limit 1) ticket,
+        (select ttype from events x where x.feature=e.feature and x.ttype is not null and x.ttype!='' order by line desc limit 1) ttype,
+        (select title from events x where x.feature=e.feature and x.title is not null and x.title!='' order by line desc limit 1) title
         from events e group by feature order by last desc""").fetchall()
 
 def status(f): return "running" if f["st"] > f["en"] else "idle"
 
-def ts(s): return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+def ts(s): return datetime.strptime(s.split(".")[0].rstrip("Z"), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)  # ms optional
 def mmss(sec): return f"{int(sec)//60:02d}:{int(sec)%60:02d}"
 
 ICON = {"feature_start": "▶", "task_assigned": "→", "question": "?", "decision": "✔", "agent_started": "·",
-        "worker_done": "■", "review_finding": "!", "stack_provisioned": "◆", "note": "·"}
-COLOR = {"question": 3, "decision": 2, "review_finding": 1, "task_assigned": 6, "worker_done": 4, "feature_start": 5}
-QA = {"question", "decision", "review_finding"}
+        "worker_done": "■", "review_finding": "!", "stack_provisioned": "◆", "note": "·",
+        "escalation": "⇧", "user_reply": "↩", "error": "✖", "tool_call": "·", "feature_end": "■", "ticket_info": "#"}
+COLOR = {"question": 3, "decision": 2, "review_finding": 1, "task_assigned": 6, "worker_done": 4, "feature_start": 5,
+         "escalation": 3, "user_reply": 5, "error": 1}
+QA = {"question", "decision", "review_finding", "escalation", "user_reply", "error"}
 
 def timeline(con, feat, width, qa_only=False):
     """-> [(text, color)] ; durations pair agent_started/stop by agent_id."""
@@ -66,6 +75,8 @@ def timeline(con, feat, width, qa_only=False):
             dur = f" ({mmss((t - starts[aid]).total_seconds())})"
         if qa_only and r["type"] not in QA: continue
         who = r["frm"] or ""
+        if r["type"] == "tool_call":  # one compact line each; hidden by the Q&A filter
+            out.append((f"+{mmss((t - t0).total_seconds())} · {who}: {(r['body'] or '')[:w]}", 0)); continue
         if r["dst"]: who = f"{who}→{r['dst']}" if who else f"→{r['dst']}"
         head = f"+{mmss((t - t0).total_seconds())} {ICON.get(r['type'], '·')} {r['type']} {who}" + \
                (f" [{r['task']}]" if r["task"] else "") + dur
@@ -81,12 +92,29 @@ def timeline(con, feat, width, qa_only=False):
 
 def local(s): return ts(s).astimezone().strftime("%m-%d %H:%M")
 
+def ticket_label(f):
+    """Ticket number FIRST: '[bug-8991] title'. Metadata (ticket_info / feature_start --ticket) wins; otherwise the
+    number is read from the slug: type-8991-name, 8991-name or name-8991 (older logs). No number -> the slug."""
+    slug = f["feature"]; tid = f["ticket"] or ""; tt = f["ttype"] or ""; name = f["title"] or ""
+    m = re.match(r"^(?:([a-z]+)-)?(\d{3,})(?:-(.*))?$", slug)
+    if m: s_tt, s_id, s_name = m.group(1) or "", m.group(2), (m.group(3) or "").replace("-", " ")
+    else:
+        m = re.search(r"^(.*?)-?(\d{3,})$", slug)
+        s_tt, s_id, s_name = ("", m.group(2), m.group(1).replace("-", " ")) if m else ("", "", "")
+    tid = tid or s_id; tt = tt or s_tt; name = name or s_name
+    if not tid: return slug
+    if tt == "wi": tt = ""  # 'wi' = work item of unknown type: show the bare number
+    return f"[{tt + '-' if tt else ''}{tid}] {name}".rstrip()
+
 def feature_line(f, w):
-    return f"{'●' if status(f) == 'running' else ' '} {f['feature']:<24.24} {local(f['first'])}  ev:{f['n']:<3} ?:{f['q']:<2} ✔:{f['d']:<2} !:{f['r']}"
+    lab = ticket_label(f); mark = "●" if status(f) == "running" else " "
+    if w < 72: return f"{mark} {lab}"  # split view: the ticket is all that fits
+    stats = f"{local(f['first'])}  ev:{f['n']:<3} ?:{f['q']:<2} ✔:{f['d']:<2} !:{f['r']}"
+    return f"{mark} {lab:<{w - len(stats) - 4}.{w - len(stats) - 4}}  {stats}"
 
 def dump(con, feat):
     if feat: print("\n".join(t for t, _ in timeline(con, feat, 100))); return
-    for f in features(con): print(feature_line(f, 100), "|", (f["title"] or "")[:60].replace("\n", " "))
+    for f in features(con): print(feature_line(f, 110))
 
 SCROLL_KEYS = {ord(c) for c in "jkbgG "} | {curses.KEY_DOWN, curses.KEY_UP, curses.KEY_NPAGE, curses.KEY_PPAGE}
 
@@ -135,12 +163,12 @@ def ui(scr, con, d):
                 lines = timeline(con, cur, body_w, qa)
                 view = h - 2; maxtop = max(0, len(lines) - view)
                 top = maxtop if follow else max(0, min(top, maxtop))
-                scr.addstr(0, lw + 1, f" {cur}{'  [Q&A only]' if qa else ''} ".ljust(body_w)[:body_w], curses.color_pair(7))
+                scr.addstr(0, lw + 1, f" {ticket_label(fs[sel])}{'  [Q&A only]' if qa else ''} ".ljust(body_w)[:body_w], curses.color_pair(7))
                 for i, (t, c) in enumerate(lines[top: top + view]):
                     scr.addstr(i + 1, lw + 1, t[:body_w], curses.color_pair(c) if c else 0)
             else:
                 f = fs[sel]
-                scr.addstr(h - 2, 0, (f["title"] or "").replace("\n", " ")[: w - 1], curses.A_DIM)
+                scr.addstr(h - 2, 0, (f["request"] or "").replace("\n", " ")[: w - 1], curses.A_DIM)
             keys = (" j/k scroll  space/b page  g/G top/end  n/p ticket  c copy  f Q&A  esc back  q quit "
                     if feat else " j/k move  enter open  c copy  q quit ")
             scr.addstr(h - 1, 0, (keys + (f"| {top + 1}/{len(lines)} " if feat else "") + (f"| {msg}" if msg else ""))[: w - 1], curses.A_DIM)

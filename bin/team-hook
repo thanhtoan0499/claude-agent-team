@@ -1,25 +1,165 @@
 #!/usr/bin/env bash
-# SubagentStart/SubagentStop hook: logs agent lifecycle and turns NEEDS_DECISION into a question event.
-# Never blocks the agent: always exits 0.
+# One hook for everything the log must capture without relying on the LLM remembering to call team-log.
+#
+# agent-team:* subagents
+#   SubagentStart       -> agent_started (ref = subagent transcript)
+#   SubagentStop        -> question (report has a NEEDS_DECISION line) | worker_done, body = FULL final report
+#   PostToolUse         -> tool_call (one line: tool + key input)
+#   PostToolUseFailure  -> error
+# main thread (the master + the user), ONLY while a feature is active (.team-log/CURRENT touched < 12 h ago)
+#   UserPromptSubmit                   -> user_reply   (the user's prompt, verbatim)
+#     + `/agent-team:team-lead <ADO work-item URL | AB#n>` with no feature tracking that ticket yet
+#       -> feature_start --ticket n  (instant, deterministic: slug wi-n, or the existing feature of ticket n)
+#       and a detached `team-ticket` that fetches type+title from Azure DevOps in the background (never blocks
+#       the prompt). The master agent logs the same metadata itself (skill step 0): hook = fast + exact id,
+#       agent = understands the ticket; the TUI shows whichever ticket_info arrives last.
+#   PreToolUse  Agent|Task|SendMessage -> task_assigned (the master's brief, verbatim)
+#   PreToolUse  AskUserQuestion        -> escalation    (questions + options)
+#   PostToolUse AskUserQuestion        -> user_reply    (the answers)
+#   PostToolUseFailure Agent|Task|SendMessage|AskUserQuestion -> error
+#
+# The final report is NOT always last_assistant_message: an agent that ends through the SubagentHandback tool
+# leaves that field empty, so the report is read from the subagent transcript (fallback chain below).
+# Payload field names are read defensively (several candidates each) because the hook schemas are only partly
+# documented; TEAM_HOOK_DEBUG=<file> appends every raw payload to that file so a missing event can be diagnosed.
+# Never blocks, never prints: always exits 0.
 trap 'exit 0' ERR
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "$DIR/_lib.sh"
 in=$(cat)
+[ -n "${TEAM_HOOK_DEBUG:-}" ] && printf '%s\n' "$in" >> "$TEAM_HOOK_DEBUG"
+# Cheap prefilter: this hook fires for EVERY prompt and tool call of the session. Skip the jq spawns unless the
+# payload mentions something we log (precise checks follow).
+case "$in" in
+  *agent-team:*|*UserPromptSubmit*|*AskUserQuestion*|*SendMessage*|*'"Agent"'*|*'"Task"'*) ;;
+  *) exit 0 ;;
+esac
 ev=$(jq -r '.hook_event_name // empty' <<<"$in")
 agent=$(jq -r '.agent_type // "unknown"' <<<"$in")
 id=$(jq -r '.agent_id // empty' <<<"$in")
-# only our own agents: the host also fires SubagentStop for unrelated background agents
-case "$agent" in agent-team:*) ;; *) exit 0 ;; esac
 cwd=$(jq -r '.cwd // empty' <<<"$in"); [ -n "$cwd" ] || cwd=$PWD
-msg=$(jq -r '.last_assistant_message // empty' <<<"$in")
 log() { ( cd "$cwd" && "$DIR/team-log" "$@" ) 2>/dev/null || true; }
-case "$ev" in
-  SubagentStart) log agent_started --from "$agent" --agent-id "$id" --body "started" ;;
-  SubagentStop)
-    if grep -q 'NEEDS_DECISION' <<<"$msg"; then
-      log question --from "$agent" --agent-id "$id" --body "${msg:0:2000}"
-    else
-      log worker_done --from "$agent" --agent-id "$id" --body "${msg:0:800}"
-    fi ;;
+MAX=30000  # sanity cap on one logged body
+J() { jq -r "$1" <<<"$in"; }  # extract with a jq filter from the payload
+
+# Subagent transcript: explicit field if the host provides it, else <session>/subagents/agent-<id>.jsonl
+# next to the session transcript (the layout Claude Code writes). Prints the path (existing or not).
+agent_transcript() {
+  local p t
+  p=$(J '.agent_transcript_path // empty')
+  if [ -z "$p" ]; then
+    t=$(J '.transcript_path // empty')
+    [ -n "$t" ] && [ -n "$id" ] && p="${t%.jsonl}/subagents/agent-$id.jsonl"
+  fi
+  [ -n "$p" ] && echo "$p"
+}
+
+# Last SubagentHandback message, else last assistant text block. Empty if none.
+final_report() {
+  jq -rs '[.[] | select(.type=="assistant") | .message.content[]?] as $b
+    | ([$b[] | select(.type=="tool_use" and .name=="SubagentHandback") | .input.message] | last)
+      // ([$b[] | select(.type=="text") | .text] | last) // empty' "$1" 2>/dev/null
+}
+
+# Compact one-line summary of a tool call's input.
+summarize() {
+  J '(.tool_input // {}) | (.command // .file_path // .path // .pattern // .query // .url // .description // tostring)
+    | tostring | gsub("[\n\r\t]+";" ") | .[0:200]'
+}
+
+# Error text of a failed tool call, whichever field carries it.
+err_text() {
+  J '(.error // .tool_response.error // .error_message // .tool_response // "failed") | tostring | gsub("[\n\r\t]+";" ") | .[0:500]'
+}
+
+team_agent_event() {
+  local tool tp msg rep tries
+  case "$ev" in
+    SubagentStart)
+      tp=$(agent_transcript || true)
+      log agent_started --from "$agent" --agent-id "$id" --body "started" ${tp:+--ref "$tp"} ;;
+    SubagentStop)
+      msg=$(J '.last_assistant_message // empty')
+      tries=${TEAM_HOOK_RETRIES:-4}
+      while :; do
+        tp=$(agent_transcript || true)
+        rep=""; [ -n "$tp" ] && [ -f "$tp" ] && rep=$(final_report "$tp")
+        [ -n "$rep" ] && { msg=$rep; break; }
+        [ -n "$msg" ] && break                       # no transcript report, but the host gave us a message
+        [ "$tries" -le 0 ] && break
+        tries=$((tries - 1)); sleep 0.4              # transcript is written asynchronously: wait for the flush
+      done
+      if grep -qE '^[[:space:]]*NEEDS_DECISION[[:space:]]*:?[[:space:]]*$' <<<"$msg"; then
+        log question --from "$agent" --agent-id "$id" --body "${msg:0:$MAX}" ${tp:+--ref "$tp"}
+      else
+        log worker_done --from "$agent" --agent-id "$id" --body "${msg:0:$MAX}" ${tp:+--ref "$tp"}
+      fi ;;
+    PostToolUse)
+      tool=$(J '.tool_name // "?"')
+      [ "$tool" = SubagentHandback ] && return 0     # its payload is the final report, logged at SubagentStop
+      log tool_call --from "$agent" --agent-id "$id" --body "$tool: $(summarize)" ;;
+    PostToolUseFailure)
+      tool=$(J '.tool_name // "?"')
+      log error --from "$agent" --agent-id "$id" --body "$tool failed: $(err_text) | input: $(summarize)" ;;
+  esac
+}
+
+# Is a feature being run right now? CURRENT exists and was touched (by any logged event) within 12 h.
+feature_active() {
+  local cur; cur="$(team_root "$cwd")/.team-log/CURRENT"
+  [ -s "$cur" ] && [ -n "$(find "$cur" -mmin -720 2>/dev/null)" ]
+}
+
+# `/agent-team:team-lead ...<ticket>` -> open (or reuse) the feature for that ticket right away.
+auto_start_feature() {
+  local p=$1 tid url cur
+  grep -qE '^[[:space:]]*/(agent-team:)?team-lead([[:space:]]|$)' <<<"$p" || return 0
+  tid=$(grep -oE '_workitems/edit/[0-9]+' <<<"$p" | head -1 | grep -oE '[0-9]+' || true)
+  [ -n "$tid" ] || tid=$(grep -oE 'AB#[0-9]+' <<<"$p" | head -1 | grep -oE '[0-9]+' || true)
+  [ -n "$tid" ] || return 0
+  cur="$(team_root "$cwd")/.team-log/CURRENT"
+  feature_active && head -1 "$cur" | grep -qE "(^|-)${tid}(-|\$)" && return 0   # already the active feature
+  log feature_start --ticket "$tid" --from user --body "${p:0:$MAX}"
+  url=$(grep -oE 'https://dev\.azure\.com/[^[:space:]]*_workitems/edit/[0-9]+' <<<"$p" | head -1 || true)
+  ( cd "$cwd" && nohup "$DIR/team-ticket" "$tid" ${url:+"$url"} >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
+}
+
+master_event() {
+  local tool to desc body q
+  [ -z "$id" ] || return 0                           # subagent calls are handled above; this is the main thread
+  if [ "$ev" = UserPromptSubmit ]; then
+    body=$(J '.prompt // .user_prompt // empty'); [ -z "$body" ] || auto_start_feature "$body"
+  fi
+  feature_active || return 0
+  tool=$(J '.tool_name // empty')
+  case "$ev:$tool" in
+    UserPromptSubmit:*)
+      body=$(J '.prompt // .user_prompt // empty')
+      [ -n "$body" ] && log user_reply --from user --to master --body "${body:0:$MAX}" ;;
+    PreToolUse:Agent|PreToolUse:Task)
+      to=$(J '.tool_input.subagent_type // "general-purpose"')
+      desc=$(J '.tool_input.description // empty')
+      body=$(J '.tool_input.prompt // empty')
+      [ -n "$body" ] && log task_assigned --from master --to "$to" --task "$desc" --body "${body:0:$MAX}" ;;
+    PreToolUse:SendMessage)
+      to=$(J '.tool_input.to // empty')
+      body=$(J '(.tool_input.message // empty) | if type=="string" then . else tojson end')
+      [ -n "$to" ] && [ -n "$body" ] && log task_assigned --from master --to "$to" --body "${body:0:$MAX}" ;;
+    PreToolUse:AskUserQuestion)
+      body=$(J '[.tool_input.questions[]? | "Q" + (if .header then " [" + .header + "]" else "" end) + ": " + .question
+        + ((.options // []) | map("\n  - " + .label + (if .description then " - " + .description else "" end)) | join(""))] | join("\n\n")')
+      q=$(J '[.tool_input.questions[]?.options[]?.label] | join("|")')
+      [ -n "$body" ] && log escalation --from master --to user --body "${body:0:$MAX}" ${q:+--options "$q"} ;;
+    PostToolUse:AskUserQuestion)
+      body=$(J '(.tool_response.answers // .tool_response // empty) | if type=="string" then . else tojson end')
+      [ -n "$body" ] && log user_reply --from user --to master --body "${body:0:$MAX}" ;;
+    PostToolUseFailure:AskUserQuestion|PostToolUseFailure:Agent|PostToolUseFailure:Task|PostToolUseFailure:SendMessage)
+      log error --from master --body "$tool failed: $(err_text)" ;;
+  esac
+}
+
+case "$agent" in
+  agent-team:*) team_agent_event ;;
+  *) master_event ;;
 esac
 exit 0

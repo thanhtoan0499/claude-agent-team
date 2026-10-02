@@ -1,32 +1,66 @@
 #!/usr/bin/env bash
 # Append one structured event to the feature's events.ndjson.
-# usage: team-log <type> [--from A] [--to B] [--task T] [--body TEXT] [--rationale TEXT] [--options "a|b"] [--agent-id ID] [--feature F]
-# types: feature_start task_assigned question decision worker_done review_finding stack_provisioned note
-# rules: question needs --from + --body; decision needs --rationale; task_assigned needs --to + --body
+# usage: team-log <type> [--from A] [--to B] [--task T] [--body TEXT] [--rationale TEXT] [--options "a|b"] [--agent-id ID] [--ref PATH] [--feature F]
+#        [--ticket N] [--type bug|task|us|...] [--title TEXT]   (ticket metadata, see naming rule below)
+# types: feature_start task_assigned question decision worker_done review_finding stack_provisioned agent_started note
+#        escalation (master -> user)  user_reply (user -> master, verbatim)  error  tool_call  feature_end
+#        ticket_info (ticket type/title, latest wins; usually written by team-ticket or the master)
+# NAMING RULE: a feature that tracks a ticket is named  <type>-<ticket>-<title-slug>  (ticket number FIRST, e.g.
+#   bug-8991-activate-version-moi-ghi-de-admin-layout) and shown as  [bug-8991] <title>  in team-tui.
+#   `feature_start --ticket N [--type T] [--title X]` builds the slug itself and REUSES the feature that already
+#   tracks ticket N (e.g. one the hook opened) instead of creating a second one; without --title/--type -> wi-N.
+# rules: question needs --from + --body; decision needs --rationale; task_assigned needs --to + --body;
+#        escalation / user_reply / error need --body
 set -euo pipefail
 . "$(dirname "$0")/_lib.sh"
 type="${1:-}"; [ -n "$type" ] || { echo "usage: team-log <type> [flags]" >&2; exit 2; }; shift
-from= to= task= body= rationale= options= feature= agent_id=
+from= to= task= body= rationale= options= feature= agent_id= ref= ticket= ttype= title=
 while [ $# -gt 0 ]; do
   case "$1" in
     --from) from=$2;; --to) to=$2;; --task) task=$2;; --body) body=$2;;
-    --rationale) rationale=$2;; --options) options=$2;; --feature) feature=$2;; --agent-id) agent_id=$2;;
+    --rationale) rationale=$2;; --options) options=$2;; --feature) feature=$2;; --agent-id) agent_id=$2;; --ref) ref=$2;; --ticket) ticket=$2;; --type) ttype=$2;; --title) title=$2;;
     *) echo "unknown flag $1" >&2; exit 2;;
   esac; shift 2 || { echo "flag needs a value" >&2; exit 2; }
 done
 case "$type" in
-  feature_start|task_assigned|question|decision|worker_done|review_finding|stack_provisioned|agent_started|note) ;;
+  feature_start|task_assigned|question|decision|worker_done|review_finding|stack_provisioned|agent_started|note|escalation|user_reply|error|tool_call|feature_end|ticket_info) ;;
   *) echo "bad type: $type" >&2; exit 2;;
 esac
 [ "$type" = question ] && { [ -n "$from" ] && [ -n "$body" ] || { echo "question needs --from and --body" >&2; exit 2; }; }
 [ "$type" = decision ] && { [ -n "$rationale" ] || { echo "decision needs --rationale (the whole point of the log)" >&2; exit 2; }; }
+case "$type" in escalation|user_reply|error) [ -n "$body" ] || { echo "$type needs --body" >&2; exit 2; };; esac
 [ "$type" = task_assigned ] && { [ -n "$to" ] && [ -n "$body" ] || { echo "task_assigned needs --to and --body" >&2; exit 2; }; }
+case "$ticket" in ""|*[!0-9]*) [ -z "$ticket" ] || { echo "--ticket must be a number" >&2; exit 2; };; esac
+[ "$type" = ticket_info ] && { [ -n "$ticket" ] || { echo "ticket_info needs --ticket" >&2; exit 2; }; }
+start=
+if [ -n "$ticket" ] && [ -z "$feature" ]; then
+  feature=$(team_ticket_feature "$ticket")
+  if [ "$type" = feature_start ]; then
+    start=1
+    if [ -n "$feature" ]; then type=ticket_info                    # already tracked: enrich it, no second feature
+    else s=$(team_slug "$title"); feature="${ttype:-wi}-${ticket}${s:+-$s}"; fi
+  elif [ -z "$feature" ] && [ "$type" = ticket_info ]; then
+    echo "ticket_info: no feature tracks ticket $ticket" >&2; exit 2
+  fi
+fi
+[ "$type" = feature_start ] && start=1
 [ -n "$feature" ] && export TEAM_FEATURE=$feature
 file=$(team_log_file)
-jq -cn --arg ts "$(date -u +%FT%TZ)" --arg feature "$(team_feature)" --arg type "$type" \
+ts=$(date -u +%FT%T.%3NZ); case "$ts" in *N*) ts=$(date -u +%FT%TZ);; esac   # ms where GNU date allows, else seconds
+line=$(jq -cn --arg ts "$ts" --arg feature "$(team_feature)" --arg type "$type" \
   --arg from "$from" --arg to "$to" --arg task "$task" --arg body "$body" \
-  --arg rationale "$rationale" --arg options "$options" --arg agent_id "$agent_id" \
-  '{ts:$ts,feature:$feature,type:$type,from:$from,to:$to,task:$task,body:$body,rationale:$rationale,options:($options|split("|")|map(select(length>0))),agent_id:$agent_id}
-   | with_entries(select(.value != "" and .value != []))' >> "$file"
-[ "$type" = feature_start ] && { r=$(team_root); mkdir -p "$r/.team-log"; team_feature > "$r/.team-log/CURRENT"; }
+  --arg rationale "$rationale" --arg options "$options" --arg agent_id "$agent_id" --arg ref "$ref" --arg ticket "$ticket" --arg ttype "$ttype" --arg title "$title" \
+  '{ts:$ts,feature:$feature,type:$type,from:$from,to:$to,task:$task,body:$body,rationale:$rationale,options:($options|split("|")|map(select(length>0))),agent_id:$agent_id,ref:$ref,ticket:$ticket,ticket_type:$ttype,title:$title}
+   | with_entries(select(.value != "" and .value != []))')
+# One event = one line, appended under an exclusive lock. Without it, parallel agents writing bodies larger than
+# the pipe/stdio buffer (~4 KB) interleave and corrupt the NDJSON (measured: 24 writers x 30 KB -> 11 bad lines).
+append() { printf '%s\n' "$line" >> "$file"; }
+if command -v flock >/dev/null 2>&1; then ( flock -x 9; append ) 9>>"$file.lock"; else append; fi
+# CURRENT = the feature whose master/user events the hook should capture. feature_start sets it, any event of that
+# feature refreshes its mtime (the hook treats it as stale after 12 h idle), feature_end clears it.
+r=$(team_root); cur="$r/.team-log/CURRENT"
+if [ -n "$start" ]; then mkdir -p "$r/.team-log"; team_feature > "$cur"
+elif [ -f "$cur" ] && [ "$(head -1 "$cur")" = "$(team_feature)" ]; then
+  if [ "$type" = feature_end ]; then rm -f "$cur"; else touch "$cur"; fi
+fi
 exit 0
