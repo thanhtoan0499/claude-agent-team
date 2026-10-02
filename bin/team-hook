@@ -12,12 +12,12 @@ cwd=$(jq -r '.cwd // empty' <<<"$in"); [ -n "$cwd" ] || cwd=$PWD
 msg=$(jq -r '.last_assistant_message // empty' <<<"$in")
 log() { ( cd "$cwd" && "$DIR/team-log" "$@" ) 2>/dev/null || true; }
 case "$ev" in
-  SubagentStart) log agent_started --from "$agent" --body "id=$id" ;;
+  SubagentStart) log agent_started --from "$agent" --agent-id "$id" --body "started" ;;
   SubagentStop)
     if grep -q 'NEEDS_DECISION' <<<"$msg"; then
-      log question --from "$agent" --body "${msg:0:2000}"
+      log question --from "$agent" --agent-id "$id" --body "${msg:0:2000}"
     else
-      log worker_done --from "$agent" --body "${msg:0:800}"
+      log worker_done --from "$agent" --agent-id "$id" --body "${msg:0:800}"
     fi ;;
 esac
 exit 0

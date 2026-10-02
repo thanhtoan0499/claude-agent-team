@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""lazygit-style browser for the team log. Left: features/tickets. Enter: timeline of that feature.
+NDJSON stays the source of truth; <log dir>/team.db (SQLite) is a derived index synced on every refresh.
+usage: team-tui            interactive (j/k move, enter open, f Q&A-only, G follow end, esc back, q quit)
+       team-tui --dump [feature]   plain text, no curses (scripts/tests)"""
+import curses, glob, json, os, sqlite3, subprocess, sys, textwrap
+from datetime import datetime, timezone
+
+def log_dir():
+    if os.environ.get("TEAM_LOG_DIR"): return os.environ["TEAM_LOG_DIR"]
+    try:
+        c = subprocess.check_output(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                    stderr=subprocess.DEVNULL, text=True).strip()
+        return os.path.join(os.path.dirname(c), ".team-log")
+    except Exception:
+        return os.path.join(os.getcwd(), ".team-log")
+
+def open_db(d):
+    os.makedirs(d, exist_ok=True)
+    con = sqlite3.connect(os.path.join(d, "team.db")); con.row_factory = sqlite3.Row
+    con.execute("""create table if not exists events(feature text, line int, ts text, type text, frm text, dst text,
+        task text, body text, rationale text, options text, agent_id text, primary key(feature, line))""")
+    return con
+
+def sync(con, d):  # append-only logs: ingest only lines beyond what the DB already has
+    for f in glob.glob(os.path.join(d, "*", "events.ndjson")):
+        feat = os.path.basename(os.path.dirname(f))
+        done = con.execute("select coalesce(max(line),0) from events where feature=?", (feat,)).fetchone()[0]
+        with open(f, encoding="utf-8") as fh:
+            for n, raw in enumerate(fh, 1):
+                if n <= done: continue
+                try: e = json.loads(raw)
+                except ValueError: continue  # torn/garbled line: skip, keep numbering
+                con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?)",
+                    (feat, n, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
+                     e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id")))
+    con.commit()
+
+def features(con):
+    return con.execute("""select feature, min(ts) first, max(ts) last, count(*) n,
+        sum(type='question') q, sum(type='decision') d, sum(type='review_finding') r,
+        sum(type='agent_started') st, sum(type in ('worker_done','question') and agent_id is not null and agent_id!='') en,
+        (select body from events x where x.feature=e.feature and type='feature_start' limit 1) title
+        from events e group by feature order by last desc""").fetchall()
+
+def status(f): return "running" if f["st"] > f["en"] else "idle"
+
+def ts(s): return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+def mmss(sec): return f"{int(sec)//60:02d}:{int(sec)%60:02d}"
+
+ICON = {"feature_start": "▶", "task_assigned": "→", "question": "?", "decision": "✔", "agent_started": "·",
+        "worker_done": "■", "review_finding": "!", "stack_provisioned": "◆", "note": "·"}
+COLOR = {"question": 3, "decision": 2, "review_finding": 1, "task_assigned": 6, "worker_done": 4, "feature_start": 5}
+QA = {"question", "decision", "review_finding"}
+
+def timeline(con, feat, width, qa_only=False):
+    """-> [(text, color)] ; durations pair agent_started/stop by agent_id."""
+    rows = con.execute("select * from events where feature=? order by line", (feat,)).fetchall()
+    if not rows: return []
+    t0 = ts(rows[0]["ts"]); starts = {}; out = []; w = max(width - 6, 20)
+    for r in rows:
+        t = ts(r["ts"]); dur = ""
+        aid = r["agent_id"]
+        if r["type"] == "agent_started" and aid: starts[aid] = t
+        elif aid and aid in starts and r["type"] in ("worker_done", "question"):
+            dur = f" ({mmss((t - starts[aid]).total_seconds())})"
+        if qa_only and r["type"] not in QA: continue
+        who = r["frm"] or ""
+        if r["dst"]: who = f"{who}→{r['dst']}" if who else f"→{r['dst']}"
+        head = f"+{mmss((t - t0).total_seconds())} {ICON.get(r['type'], '·')} {r['type']} {who}" + \
+               (f" [{r['task']}]" if r["task"] else "") + dur
+        c = COLOR.get(r["type"], 0)
+        out.append((head, c))
+        if r["type"] == "agent_started": continue
+        for para in (r["body"] or "").splitlines() or [""]:
+            for ln in textwrap.wrap(para, w) or ([""] if r["body"] else []): out.append(("    " + ln, 0))
+        if r["options"]: out.append(("    options: " + r["options"], 0))
+        if r["rationale"]:
+            for i, ln in enumerate(textwrap.wrap(r["rationale"], w - 5)): out.append(("    " + ("WHY: " if not i else "     ") + ln, 2))
+    return out
+
+def local(s): return ts(s).astimezone().strftime("%m-%d %H:%M")
+
+def feature_line(f, w):
+    return f"{'●' if status(f) == 'running' else ' '} {f['feature']:<24.24} {local(f['first'])}  ev:{f['n']:<3} ?:{f['q']:<2} ✔:{f['d']:<2} !:{f['r']}"
+
+def dump(con, feat):
+    if feat: print("\n".join(t for t, _ in timeline(con, feat, 100))); return
+    for f in features(con): print(feature_line(f, 100), "|", (f["title"] or "")[:60].replace("\n", " "))
+
+def ui(scr, con, d):
+    curses.curs_set(0); curses.use_default_colors()
+    for i in range(1, 7): curses.init_pair(i, i, -1)
+    curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    scr.timeout(2000)
+    feat = None; sel = 0; top = 0; qa = False; follow = True; lw = 0
+    while True:
+        sync(con, d); fs = features(con); h, w = scr.getmaxyx(); scr.erase()
+        if not fs: scr.addstr(0, 0, f"no events in {d}   (q quit)"); k = scr.getch()
+        else:
+            sel = max(0, min(sel, len(fs) - 1)); lw = min(max(48, w // 3), w - 20) if feat else w
+            scr.addstr(0, 0, " Tickets / features ".ljust(lw)[:lw], curses.color_pair(7))
+            for i, f in enumerate(fs[: h - 2]):
+                attr = curses.A_REVERSE if i == sel else (curses.color_pair(2) if status(f) == "running" else 0)
+                scr.addstr(i + 1, 0, feature_line(f, lw).ljust(lw)[: lw - 1], attr)
+            if feat:
+                cur = fs[sel]["feature"]; body_w = w - lw - 2
+                lines = timeline(con, cur, body_w, qa)
+                view = h - 2; top = max(0, len(lines) - view) if follow else max(0, min(top, len(lines) - view))
+                scr.addstr(0, lw + 1, f" {cur}{'  [Q&A only]' if qa else ''} ".ljust(body_w)[:body_w], curses.color_pair(7))
+                for i, (t, c) in enumerate(lines[top: top + view]):
+                    scr.addstr(i + 1, lw + 1, t[:body_w], curses.color_pair(c) if c else 0)
+            else:
+                f = fs[sel]
+                scr.addstr(h - 2, 0, (f["title"] or "").replace("\n", " ")[: w - 1], curses.A_DIM)
+            scr.addstr(h - 1, 0, (" j/k move  enter open  f Q&A-only  G follow  esc back  q quit "
+                                  + ("" if not feat else f"| {top + 1}/{len(lines)}"))[: w - 1], curses.A_DIM)
+            k = scr.getch()
+        if k in (ord("q"),) or (k == 27 and not feat): return
+        if k == 27 and feat: feat = None
+        elif k in (ord("j"), curses.KEY_DOWN):
+            sel += 1; top = 0; follow = True
+        elif k in (ord("k"), curses.KEY_UP): sel -= 1; top = 0; follow = True
+        elif k in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT, ord("l")): feat = True; follow = True
+        elif k == curses.KEY_LEFT or k == ord("h"): feat = None
+        elif k == ord("f"): qa = not qa
+        elif k == ord("G"): follow = True
+        elif feat and k in (curses.KEY_NPAGE, ord(" ")): top += h - 3; follow = False
+        elif feat and k in (curses.KEY_PPAGE, ord("b")): top = max(0, top - (h - 3)); follow = False
+        elif feat and k == ord("g"): top = 0; follow = False
+
+if __name__ == "__main__":
+    d = log_dir(); con = open_db(d); sync(con, d)
+    if len(sys.argv) > 1 and sys.argv[1] == "--dump": dump(con, sys.argv[2] if len(sys.argv) > 2 else None)
+    else: curses.wrapper(ui, con, d)

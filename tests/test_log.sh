@@ -18,4 +18,10 @@ f=.team-log/demo/events.ndjson
 mkdir -p .claude/worktrees/wt1; ( cd .claude/worktrees/wt1 && "$B/team-log" note --body hi )
 [ -s .team-log/wt1/events.ndjson ] || { echo "FAIL: worktree slug"; exit 1; }
 "$B/team-report" demo | tail -1
+# agent_id lands in log; TUI index pairs start/stop into a duration and keeps Q&A
+[ "$(jq -s 'map(select(.agent_id=="a1"))|length' $f)" -ge 2 ] || { echo "FAIL: agent_id not logged"; exit 1; }
+"$B/team-tui" --dump | grep -q "demo" || { echo "FAIL: tui feature list"; exit 1; }
+out=$("$B/team-tui" --dump demo); grep -q "WHY: matches existing ids" <<<"$out" || { echo "FAIL: tui rationale"; exit 1; }
+grep -q "NEEDS_DECISION" <<<"$out" || { echo "FAIL: tui question"; exit 1; }
+[ -s .team-log/team.db ] || { echo "FAIL: sqlite index"; exit 1; }
 echo PASS

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Append one structured event to the feature's events.ndjson.
-# usage: team-log <type> [--from A] [--to B] [--task T] [--body TEXT] [--rationale TEXT] [--options "a|b"] [--feature F]
+# usage: team-log <type> [--from A] [--to B] [--task T] [--body TEXT] [--rationale TEXT] [--options "a|b"] [--agent-id ID] [--feature F]
 # types: feature_start task_assigned question decision worker_done review_finding stack_provisioned note
 # rules: question needs --from + --body; decision needs --rationale; task_assigned needs --to + --body
 set -euo pipefail
 . "$(dirname "$0")/_lib.sh"
 type="${1:-}"; [ -n "$type" ] || { echo "usage: team-log <type> [flags]" >&2; exit 2; }; shift
-from= to= task= body= rationale= options= feature=
+from= to= task= body= rationale= options= feature= agent_id=
 while [ $# -gt 0 ]; do
   case "$1" in
     --from) from=$2;; --to) to=$2;; --task) task=$2;; --body) body=$2;;
-    --rationale) rationale=$2;; --options) options=$2;; --feature) feature=$2;;
+    --rationale) rationale=$2;; --options) options=$2;; --feature) feature=$2;; --agent-id) agent_id=$2;;
     *) echo "unknown flag $1" >&2; exit 2;;
   esac; shift 2 || { echo "flag needs a value" >&2; exit 2; }
 done
@@ -25,8 +25,8 @@ esac
 file=$(team_log_file)
 jq -cn --arg ts "$(date -u +%FT%TZ)" --arg feature "$(team_feature)" --arg type "$type" \
   --arg from "$from" --arg to "$to" --arg task "$task" --arg body "$body" \
-  --arg rationale "$rationale" --arg options "$options" \
-  '{ts:$ts,feature:$feature,type:$type,from:$from,to:$to,task:$task,body:$body,rationale:$rationale,options:($options|split("|")|map(select(length>0)))}
+  --arg rationale "$rationale" --arg options "$options" --arg agent_id "$agent_id" \
+  '{ts:$ts,feature:$feature,type:$type,from:$from,to:$to,task:$task,body:$body,rationale:$rationale,options:($options|split("|")|map(select(length>0))),agent_id:$agent_id}
    | with_entries(select(.value != "" and .value != []))' >> "$file"
 [ "$type" = feature_start ] && { r=$(team_root); mkdir -p "$r/.team-log"; team_feature > "$r/.team-log/CURRENT"; }
 exit 0

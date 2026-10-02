@@ -28,10 +28,14 @@ worktree name is the feature slug.
 | `agent_started`, `worker_done`, `question` | `SubagentStart/Stop` hook (a `NEEDS_DECISION` reply becomes `question`) |
 
 ```
+bin/team-tui                  # lazygit-style: left = tickets, Enter = timeline (agents, questions, decisions+WHY)
 bin/team-report [feature]     # timeline: who asked what, what master decided and WHY
 /agent-team:team-retro        # find repeated questions / reversed decisions → improve agent prompts
 bash tests/test_log.sh        # self-check
 ```
+`team-tui` keys: j/k move · enter open · f Q&A-only · G follow · g/PgUp/PgDn scroll · esc back · q quit.
+NDJSON is the source of truth; `.team-log/team.db` (SQLite) is a derived index rebuilt incrementally, safe to delete.
+
 `team-log` refuses a `decision` without `--rationale`, a `question` without `--from`, a `task_assigned` without `--to`/`--body`.
 
 ## Not yet (v0.1)
