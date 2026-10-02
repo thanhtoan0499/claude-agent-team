@@ -2,7 +2,7 @@
 # Runnable self-check: logging rules + hook + report. usage: bash tests/test_log.sh
 set -euo pipefail
 B=$(cd "$(dirname "$0")/../bin" && pwd)
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); export TEAM_HOME=$(mktemp -d); trap 'rm -rf "$T" "$TEAM_HOME"' EXIT   # never touch the real ~/.claude/agent-team
 git -C "$T" init -q; cd "$T"
 "$B/team-log" feature_start --body "demo" --feature demo
 "$B/team-log" task_assigned --to backend --task t1 --body "add endpoint"
@@ -24,7 +24,16 @@ mkdir -p .claude/worktrees/wt1; ( cd .claude/worktrees/wt1 && "$B/team-log" note
 "$B/team-tui" --dump | grep -q "demo" || { echo "FAIL: tui feature list"; exit 1; }
 out=$("$B/team-tui" --dump demo); grep -q "WHY: matches existing ids" <<<"$out" || { echo "FAIL: tui rationale"; exit 1; }
 grep -q "NEEDS_DECISION" <<<"$out" || { echo "FAIL: tui question"; exit 1; }
-[ -s .team-log/team.db ] || { echo "FAIL: sqlite index"; exit 1; }
+[ -s "$TEAM_HOME/team.db" ] || { echo "FAIL: shared sqlite index"; exit 1; }
+[ ! -e .team-log/team.db ] || { echo "FAIL: per-repo team.db should no longer be written"; exit 1; }
+# shared index: the repo is registered by team-log, events carry the plugin version, a missing/unwritable home never breaks logging
+grep -qxF "$T/.team-log" "$TEAM_HOME/repos" || { echo "FAIL: repo not registered: $(cat "$TEAM_HOME/repos")"; exit 1; }
+[ "$(grep -c . "$TEAM_HOME/repos")" = 1 ] || { echo "FAIL: repo registered more than once"; exit 1; }
+ver=$(jq -r .version "$B/../.claude-plugin/plugin.json")
+jq -e --arg v "$ver" 'select(.plugin_version != $v)' .team-log/demo/events.ndjson >/dev/null && { echo "FAIL: event without plugin_version $ver"; exit 1; }
+"$B/team-tui" --query "select plugin_version, count(*) from events where feature='demo' group by 1" | grep -q "^$ver" || { echo "FAIL: plugin_version not in the index"; exit 1; }
+TEAM_HOME=/proc/nope/x "$B/team-log" note --body "home unwritable" --feature demo || { echo "FAIL: logging must survive an unwritable TEAM_HOME"; exit 1; }
+grep -q "home unwritable" .team-log/demo/events.ndjson || { echo "FAIL: event lost when TEAM_HOME unwritable"; exit 1; }
 # in-ticket scrolling: j/k move the log, not the ticket list
 python3 - "$B/team-tui" <<'PY'
 import importlib.machinery as im, importlib.util as iu, sys
@@ -210,7 +219,7 @@ jq -s -e '[.[]|select(.type=="decision")|.decided_by]==["master","user"]' $f7 >/
 [ "$(G "${base[@]}" --to backend --task t1 | head -1)" = "DECIDE" ] || { echo "FAIL: ROUND_LIMIT leaked across agents"; exit 1; }
 # report + tui understand the new fields
 r=$("$B/team-report" g7); grep -q "decided by user" <<<"$r" && grep -q "gate: DECIDE" <<<"$r" && grep -q "decided by: master 1 / user 1 / policy 0" <<<"$r" || { echo "FAIL: report gate/decided_by: $r"; exit 1; }
-rm -f .team-log/team.db; "$B/team-tui" --dump g7 >/dev/null || { echo "FAIL: tui with gate events"; exit 1; }
+rm -f "$TEAM_HOME/team.db"; "$B/team-tui" --dump g7 >/dev/null || { echo "FAIL: tui with gate events"; exit 1; }
 # policy card: SessionStart + every 6th prompt, only for the active feature's main thread
 SS='{"hook_event_name":"SessionStart","source":"compact","cwd":"'"$T"'"}'
 out=$(echo "$SS" | "$B/team-hook")

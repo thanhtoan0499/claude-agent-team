@@ -1,6 +1,6 @@
 ---
 name: team-retro
-description: Analyse a feature's team log (.team-log/<feature>/events.ndjson) to find what to improve in the agents — repeated questions, reversed decisions, agents the reviewer keeps catching, escalations. Use after a team-lead run, or when the user says "retro", "nâng cấp team", "xem log team".
+description: Analyse the team log of one ticket, or of ALL tickets and repos, to find what to improve in the agents — repeated questions, reversed decisions, agents the reviewer keeps catching, escalations, before/after a plugin version. Use after a team-lead run, or on "retro", "nâng cấp team", "xem log team".
 ---
 
 # Team retro
@@ -13,3 +13,20 @@ description: Analyse a feature's team log (.team-log/<feature>/events.ndjson) to
 3. Output, max 1 page: (a) repeated questions → rule to add to that agent's `.md`; (b) decisions that were
    reversed → contract/planner gap; (c) concrete diffs to `agents/*.md` or `skills/team-lead/SKILL.md`.
 4. Do NOT edit agents without the user's OK.
+
+## Across tickets and repos (the shared index)
+
+Every repo's log is indexed in `~/.claude/agent-team/team.db` (table `events`: src, repo, feature, line, ts, type, frm, dst,
+task, body, rationale, options, agent_id, ticket, ttype, title, decided_by, verdict, codes, plugin_version). Query it with
+`team-tui --query "<SQL>"` (read-only, tab-separated; works from any directory). Events written before 0.1.13 have no
+`plugin_version`. Use this when one ticket is too small a sample to justify a prompt change (3+ tickets showing the same thing).
+
+- Did an upgrade help? `select coalesce(plugin_version,'before 0.1.13') v, count(distinct src||'/'||feature) tickets,
+  sum(type='question') questions, sum(type='escalation') escalations, sum(type='gate' and verdict='ESCALATE') gate_escalate,
+  sum(type='decision' and decided_by='user') user_decisions from events group by 1 order by 1` — compare per ticket, not totals.
+- Same question asked again: `select frm agent, substr(body,1,70) q, count(*) n from events where type='question' group by 1,2 having n>1 order by n desc`
+- Where the reviewer keeps finding things: `select repo, feature, count(*) from events where type='review_finding' group by 1,2 order by 3 desc`
+- Who decides: `select decided_by, count(*) from events where type='decision' group by 1`
+- Gate outcomes by reason: `select verdict, codes, count(*) from events where type='gate' group by 1,2`
+
+State the sample size next to every number. A pattern in one ticket is an anecdote, not a rule.

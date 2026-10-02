@@ -89,10 +89,11 @@ big = "\n".join(f"row {i}" for i in range(80))
 H.write_log(
     d, "bug-2-long", [H.ev(0, "note", "short"), H.ev(1, "worker_done", big, agent_id="a1"), H.ev(2, "note", "tail")]
 )
-con = tt.open_db(d)
-tt.sync(con, d)
-collapsed = [t.strip() for t, _ in tt.Timeline("bug-2-long", 100).update(con)]
-full = [t.strip() for t, _ in tt.timeline(con, "bug-2-long", 100)]
+con = tt.open_db(os.path.join(d, "team.db"))
+tt.sync(con, [d])
+F2 = (d, "bug-2-long")
+collapsed = [t.strip() for t, _ in tt.Timeline(F2, 100).update(con)]
+full = [t.strip() for t, _ in tt.timeline(con, F2, 100)]
 ok("row 19" in collapsed and "row 20" not in collapsed, "preview = first 20 body lines")
 ok("… +60 more lines  (o: expand)" in collapsed, "marker counts the hidden source lines")
 ok(
@@ -146,30 +147,30 @@ ok(addstr_count(["\n"] + [-1] * 20) == addstr_count(["\n"]), "20 idle ticks draw
 # ---- incremental sync: only new bytes; follows appends; half-written tail; garbled line; truncated log ----
 d = fresh()
 H.write_log(d, "bug-4-live", [H.ev(i, "note", f"n{i}") for i in range(5)])
-con = tt.open_db(d)
-ok(tt.sync(con, d) == 5, "first sync ingests 5")
-ok(tt.sync(con, d) == 0, "second sync ingests nothing")
-tl = tt.Timeline("bug-4-live", 100)
+con = tt.open_db(os.path.join(d, "team.db"))
+ok(tt.sync(con, [d]) == 5, "first sync ingests 5")
+ok(tt.sync(con, [d]) == 0, "second sync ingests nothing")
+tl = tt.Timeline((d, "bug-4-live"), 100)
 n0 = len(tl.update(con))
 H.write_log(d, "bug-4-live", [H.ev(5, "note", "n5")])
 ok(
-    tt.sync(con, d) == 1 and len(tl.update(con)) == n0 + 2,
+    tt.sync(con, [d]) == 1 and len(tl.update(con)) == n0 + 2,
     "an appended event reaches the existing Timeline (header + body)",
 )
 p = os.path.join(d, "bug-4-live", "events.ndjson")
 count = lambda: con.execute("select count(*) from events").fetchone()[0]
 with open(p, "a") as fh:
     fh.write('{"ts":"2026-10-02T09:00:09Z","type":"note","body":"half')
-ok(tt.sync(con, d) == 0, "half-written tail is not ingested")
+ok(tt.sync(con, [d]) == 0, "half-written tail is not ingested")
 with open(p, "a") as fh:
     fh.write('"}\n')
-ok(tt.sync(con, d) == 1 and count() == 7, "…and is picked up once finished")
+ok(tt.sync(con, [d]) == 1 and count() == 7, "…and is picked up once finished")
 with open(p, "a") as fh:
     fh.write('{"ts":"2026-10-02T09:00:10Z","type":"note","body":"no newline"}')
-ok(tt.sync(con, d) == 1, "complete JSON without a newline is shown")
+ok(tt.sync(con, [d]) == 1, "complete JSON without a newline is shown")
 with open(p, "a") as fh:
     fh.write("\nnot json at all\n" + '{"ts":"2026-10-02T09:00:11Z","type":"note","body":"after garbage"}\n')
-ok(tt.sync(con, d) == 1 and count() == 9, "garbled line is skipped, the next one is ingested")
+ok(tt.sync(con, [d]) == 1 and count() == 9, "garbled line is skipped, the next one is ingested")
 ok(
     con.execute("select line from events where body='after garbage'").fetchone()[0] == 10,
     "…and numbering still counts the garbled line",
@@ -177,7 +178,57 @@ ok(
 first = open(p).read().splitlines()[0] + "\n"
 with open(p, "w") as fh:  # log replaced by a shorter one
     fh.write(first)
-ok(tt.sync(con, d) == 1 and count() == 1, "truncated log is reindexed")
+ok(tt.sync(con, [d]) == 1 and count() == 1, "truncated log is reindexed")
 tt._seen.clear()
-ok(tt.sync(tt.open_db(d), d) == 0, "a new process resumes after what the DB already holds")
+ok(tt.sync(tt.open_db(os.path.join(d, "team.db")), [d]) == 0, "a new process resumes after what the DB already holds")
+
+# ---- shared index: every repo's tickets from anywhere, registry, --add, --query, same slug in two repos ----
+import subprocess
+
+def sh(cmd, cwd, env_extra=None, ok_rc=(0,)):
+    env = {**os.environ, "TEAM_HOME": HOME, **(env_extra or {})}
+    env.pop("TEAM_LOG_DIR", None)
+    r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+    ok(r.returncode in ok_rc, f"{cmd} rc={r.returncode}: {r.stderr[-200:]}")
+    return r.stdout
+
+TUI = os.path.join(H.HERE, "..", "bin", "team-tui")
+HOME = tempfile.mkdtemp()
+def mkrepo(name, tickets):
+    r = os.path.join(tempfile.mkdtemp(), name); os.makedirs(r)
+    subprocess.run(["git", "init", "-q", r], check=True)
+    for t, n in tickets:
+        H.write_log(os.path.join(r, ".team-log"), t, [H.ev(i, "note", f"{name} {t} {i}", plugin_version="0.1.13") for i in range(n)])
+    return r
+A = mkrepo("alpha", [("bug-100-same-slug", 3), ("bug-101-only-a", 2)])
+B = mkrepo("beta", [("bug-100-same-slug", 4)])
+sh(["python3", TUI, "--add", B], "/")
+ok(open(os.path.join(HOME, "repos")).read().strip() == os.path.join(B, ".team-log"), "--add registers the repo's .team-log")
+out = sh(["python3", TUI, "--dump"], A)
+ok(out.count("\n") == 3 and "alpha" in out and "beta" in out and "[bug-101]" in out, f"run in alpha: sees alpha AND beta:\n{out}")
+ok(os.path.join(A, ".team-log") in open(os.path.join(HOME, "repos")).read().split(), "the repo you run in is registered automatically")
+out = sh(["python3", TUI, "--dump"], tempfile.mkdtemp())  # outside any repo: still shows both
+ok("alpha" in out and "beta" in out, "run from a folder that is not a repo still shows every registered repo")
+one = sh(["python3", TUI, "--dump", "beta/bug-100-same-slug"], "/")
+ok("beta bug-100-same-slug 3" in one and "alpha" not in one and "==" not in one, "repo/ticket selects one timeline")
+both = sh(["python3", TUI, "--dump", "bug-100-same-slug"], "/")
+ok("== alpha/bug-100-same-slug ==" in both and "== beta/bug-100-same-slug ==" in both, "a slug used in two repos prints both, headed")
+nope = subprocess.run(["python3", TUI, "--dump", "nope"], env={**os.environ, "TEAM_HOME": HOME}, cwd="/", capture_output=True, text=True)
+ok(nope.returncode != 0 and "no ticket" in nope.stderr, "unknown ticket is an error, not an empty success")
+q = sh(["python3", TUI, "--query", "select repo, count(*) n, min(plugin_version) v from events group by repo order by repo"], "/")
+ok(q.splitlines() == ["repo\tn\tv", "alpha\t5\t0.1.13", "beta\t4\t0.1.13"], f"--query: {q!r}")
+bad = subprocess.run(["python3", TUI, "--query", "delete from events"], env={**os.environ, "TEAM_HOME": HOME}, cwd="/", capture_output=True, text=True)
+ok(bad.returncode != 0 and "readonly" in bad.stderr.lower().replace(" ", ""), f"--query cannot write: {bad.stderr[-120:]}")
+ok(sh(["python3", TUI, "--query", "select count(*) from events"], "/").split()[-1] == "9", "…and nothing was deleted")
+# the index is disposable: delete it, it comes back identical
+os.remove(os.path.join(HOME, "team.db"))
+ok(sh(["python3", TUI, "--query", "select count(*) from events"], "/").split()[-1] == "9", "team.db rebuilt from the NDJSON files")
+# new events from another repo show up in an open TUI on the next tick
+scr_d = fresh(); H.write_log(scr_d, "bug-700-live", [H.ev(0, "note", "first")])
+extra = tempfile.mkdtemp(); H.write_log(extra, "bug-800-late", [H.ev(1, "note", "second")])
+srcs = [scr_d]
+s = H.Scr(24, 120, [lambda: srcs.append(extra), -1])
+tt.ui(s, tt.open_db(os.path.join(scr_d, "team.db")), lambda: list(srcs))
+shown = " ".join(s.frames[-1].values())
+ok("[bug-700]" in " ".join(s.frames[0].values()) and "[bug-800]" in shown, "a repo registered while the TUI is open appears on the next tick")
 print("PASS")

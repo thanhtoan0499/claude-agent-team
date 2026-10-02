@@ -56,11 +56,13 @@ fi
 [ "$type" = feature_start ] && start=1
 [ -n "$feature" ] && export TEAM_FEATURE=$feature
 file=$(team_log_file)
+team_register "$(dirname "$(dirname "$file")")"
+ver=$(team_version)
 ts=$(date -u +%FT%T.%3NZ); case "$ts" in *N*) ts=$(date -u +%FT%TZ);; esac   # ms where GNU date allows, else seconds
 line=$(jq -cn --arg ts "$ts" --arg feature "$(team_feature)" --arg type "$type" \
   --arg from "$from" --arg to "$to" --arg task "$task" --arg body "$body" \
-  --arg rationale "$rationale" --arg options "$options" --arg agent_id "$agent_id" --arg ref "$ref" --arg ticket "$ticket" --arg ttype "$ttype" --arg title "$title" --arg decided_by "$decided_by" --arg verdict "$verdict" --arg codes "$codes" \
-  '{ts:$ts,feature:$feature,type:$type,from:$from,to:$to,task:$task,body:$body,rationale:$rationale,options:($options|split("|")|map(select(length>0))),agent_id:$agent_id,ref:$ref,ticket:$ticket,ticket_type:$ttype,title:$title,decided_by:$decided_by,verdict:$verdict,codes:$codes}
+  --arg rationale "$rationale" --arg options "$options" --arg agent_id "$agent_id" --arg ref "$ref" --arg ticket "$ticket" --arg ttype "$ttype" --arg title "$title" --arg decided_by "$decided_by" --arg verdict "$verdict" --arg codes "$codes" --arg plugin_version "$ver" \
+  '{ts:$ts,feature:$feature,type:$type,from:$from,to:$to,task:$task,body:$body,rationale:$rationale,options:($options|split("|")|map(select(length>0))),agent_id:$agent_id,ref:$ref,ticket:$ticket,ticket_type:$ttype,title:$title,decided_by:$decided_by,verdict:$verdict,codes:$codes,plugin_version:$plugin_version}
    | with_entries(select(.value != "" and .value != []))')
 # One event = one line, appended under an exclusive lock. Without it, parallel agents writing bodies larger than
 # the pipe/stdio buffer (~4 KB) interleave and corrupt the NDJSON (measured: 24 writers x 30 KB -> 11 bad lines).

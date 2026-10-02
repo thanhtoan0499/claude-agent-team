@@ -70,9 +70,9 @@ def ev(i, type="note", body="", **kw):
 
 def run(tt, d, keys, h=24, w=120):
     scr = Scr(h, w, keys)
-    con = tt.open_db(d)
-    tt.sync(con, d)
-    tt.ui(scr, con, d)
+    con = tt.open_db(os.path.join(d, "team.db"))
+    tt.sync(con, [d])
+    tt.ui(scr, con, lambda: [d])
     return scr
 
 

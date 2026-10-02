@@ -13,8 +13,8 @@ ld = importlib.machinery.SourceFileLoader("tt", os.path.join(here, "..", "bin", 
 tt = importlib.util.module_from_spec(importlib.util.spec_from_loader("tt", ld))
 ld.exec_module(tt)
 d = sys.argv[1]
-con = tt.open_db(d)
-tt.sync(con, d)
+con = tt.open_db(os.path.join(d, "team.db"))
+tt.sync(con, [d])
 
 
 def T(label, fn, n=20):
@@ -25,9 +25,9 @@ def T(label, fn, n=20):
     return r
 
 
-T("sync (nothing new)", lambda: tt.sync(con, d))
+T("sync (nothing new)", lambda: tt.sync(con, [d]))
 fs = T("features()", lambda: tt.features(con))
 for f in fs:
-    n = f["feature"]
-    sz = con.execute("select coalesce(sum(length(body)),0) from events where feature=?", (n,)).fetchone()[0]
-    T(f"timeline {n[:24]} ({f['n']}ev, {sz}B)", lambda: tt.timeline(con, n, 100))
+    n, i = f["feature"], tt.fid(f)
+    sz = con.execute("select coalesce(sum(length(body)),0) from events where src=? and feature=?", i).fetchone()[0]
+    T(f"timeline {n[:24]} ({f['n']}ev, {sz}B)", lambda: tt.timeline(con, i, 100))

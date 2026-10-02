@@ -77,11 +77,19 @@ Appends are serialised with `flock` (parallel agents with large bodies would oth
 `TEAM_HOOK_DEBUG=/tmp/hook.ndjson` appends every raw hook payload to that file, for diagnosing a missing event.
 
 ```
-bin/team-tui                  # lazygit-style: left = tickets, Enter = timeline (agents, questions, decisions+WHY)
+bin/team-tui                  # lazygit-style, ALL repos at once: left = tickets (with repo), Enter = timeline (agents, questions, decisions+WHY)
 bin/team-report [feature]     # timeline: who asked what, what master decided and WHY
 /agent-team:team-retro        # find repeated questions / reversed decisions → improve agent prompts
 bash tests/test_log.sh        # self-check
 ```
+**Shared index.** Hooks still append to `<repo>/.team-log/<ticket>/events.ndjson` (the source of truth). `team-log` also lists the repo in
+`~/.claude/agent-team/repos`, and `team-tui` keeps a derived SQLite index of all of them in `~/.claude/agent-team/team.db`, so you can open it
+from any directory and see every repo's tickets. The repo you run it in is added automatically; `team-tui --add <repo>` adds one by hand.
+`team-tui --query "<SQL>"` runs read-only SQL over it (`team-retro` uses this to compare tickets and plugin versions; every event carries
+`plugin_version`). Delete `team.db` any time: it is rebuilt from the NDJSON files. `TEAM_HOME` moves the folder; `TEAM_LOG_DIR=<dir>` restricts
+the TUI to one log folder with its own `team.db` inside. Logs hold ticket text, agent reports and the commands run, so this folder collects
+every project's in one place under your home.
+
 `team-tui` keys: j/k move (list) or scroll (inside a ticket) · g/G (or Home/End) first/last ticket, top/end of a log · space/b page · o expand the collapsed body on screen, O expand all · n/p next/prev ticket · c copy the full timeline (wl-copy, xclip, else OSC52) · f Q&A-only · enter open · esc back · q quit. The footer shows `from-to/total TOP|END`. Bodies longer than 20 lines are collapsed to a preview (`… +N more lines`), so a long planner report no longer costs a re-wrap on every key; `--dump` and `c` always give the whole text.
 NDJSON is the source of truth; `.team-log/team.db` (SQLite) is a derived index rebuilt incrementally, safe to delete.
 

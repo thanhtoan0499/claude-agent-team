@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""lazygit-style browser for the team log. Left: features/tickets. Enter: timeline of that feature.
-NDJSON stays the source of truth; <log dir>/team.db (SQLite) is a derived index synced on every refresh.
+"""lazygit-style browser for the team log of EVERY repo. Left: tickets (all repos, newest first). Enter: timeline.
+Each repo's <repo>/.team-log/<ticket>/events.ndjson stays the source of truth (the hooks only ever append there).
+~/.claude/agent-team/team.db (SQLite; TEAM_HOME overrides the folder) is a derived index over all of them: repos are listed
+in ~/.claude/agent-team/repos by team-log, and the repo you run team-tui in is added automatically. Delete team.db any time:
+it is rebuilt from the NDJSON files (rows of a repo that was deleted from disk survive in it until you delete it).
 usage: team-tui            interactive (j/k move, g/G first/last, enter open, o expand, f Q&A-only, esc back, q quit)
-       team-tui --dump [feature]   plain text, no curses (scripts/tests)
+       team-tui --dump [ticket|repo/ticket]   plain text, no curses (scripts/tests)
+       team-tui --add PATH     register a repo (its .team-log) or a .team-log folder
+       team-tui --query SQL    read-only SQL over the index (table events), tab-separated; used by team-retro
+TEAM_LOG_DIR=<dir> restricts everything to that one log folder (own team.db inside it): old per-repo behaviour.
 Cost model: a keypress never rebuilds the timeline. Lines are built once per (ticket, width, filter), extended only by
 events appended since, and a body longer than BODY_PREVIEW lines is wrapped lazily: only its head, until you press o."""
 import os
@@ -10,8 +16,10 @@ os.environ.setdefault("ESCDELAY", "25")  # curses waits this long after Esc for 
 import curses, glob, json, re, sqlite3, subprocess, sys, textwrap
 from datetime import datetime, timezone
 
-def log_dir():
-    if os.environ.get("TEAM_LOG_DIR"): return os.environ["TEAM_LOG_DIR"]
+def team_home(): return os.environ.get("TEAM_HOME") or os.path.expanduser("~/.claude/agent-team")
+
+def repo_log_dir():
+    """The .team-log of the repo we are in (worktrees share the main repo's)."""
     try:
         c = subprocess.check_output(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
                                     stderr=subprocess.DEVNULL, text=True).strip()
@@ -19,15 +27,46 @@ def log_dir():
     except Exception:
         return os.path.join(os.getcwd(), ".team-log")
 
-def open_db(d):
-    os.makedirs(d, exist_ok=True)
-    con = sqlite3.connect(os.path.join(d, "team.db")); con.row_factory = sqlite3.Row
+def registry():
+    try:
+        with open(os.path.join(team_home(), "repos"), encoding="utf-8") as fh:
+            return list(dict.fromkeys(l.strip() for l in fh if l.strip()))
+    except OSError:
+        return []
+
+def register(path):
+    path = os.path.abspath(path)
+    if os.path.basename(path) != ".team-log": path = os.path.join(path, ".team-log")
+    if path in registry(): return path
+    os.makedirs(team_home(), exist_ok=True)
+    with open(os.path.join(team_home(), "repos"), "a", encoding="utf-8") as fh: fh.write(path + "\n")
+    return path
+
+def make_sources():
+    """-> callable returning the log folders to index. Re-reads the registry each call, so a repo that starts logging
+    while the TUI is open shows up on the next tick."""
+    if os.environ.get("TEAM_LOG_DIR"):
+        only = [os.environ["TEAM_LOG_DIR"]]; return lambda: only
+    here = repo_log_dir(); added = []
+    def sources():
+        if not added and os.path.isdir(here): register(here)
+        added.append(1)
+        return registry()
+    return sources
+
+def db_path():
+    return os.path.join(os.environ["TEAM_LOG_DIR"] if os.environ.get("TEAM_LOG_DIR") else team_home(), "team.db")
+
+def open_db(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    con = sqlite3.connect(path); con.row_factory = sqlite3.Row
     cols = [r[1] for r in con.execute("pragma table_info(events)")]
-    if cols and "verdict" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
-    con.execute("""create table if not exists events(feature text, line int, ts text, type text, frm text, dst text,
-        task text, body text, rationale text, options text, agent_id text, ticket text, ttype text, title text,
-        decided_by text, verdict text, codes text,
-        primary key(feature, line))""")
+    if cols and "plugin_version" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
+    con.execute("""create table if not exists events(src text, repo text, feature text, line int, ts text, type text,
+        frm text, dst text, task text, body text, rationale text, options text, agent_id text, ticket text, ttype text,
+        title text, decided_by text, verdict text, codes text, plugin_version text,
+        primary key(src, feature, line))""")
+    con.execute("create index if not exists ev_type on events(type)")
     return con
 
 _seen = {}  # log path -> (lines consumed, byte offset): where this process stopped reading each append-only log
@@ -41,48 +80,57 @@ def _skip(f, n):
             c += 1; off += len(raw)
     return c, off
 
-def sync(con, d):
-    """Ingest events appended since the last call, reading only the new bytes (a keypress must not re-read the whole log).
-    -> number of new events."""
+def repo_name(src): return os.path.basename(os.path.dirname(os.path.abspath(src).rstrip("/"))) or src
+
+def sync(con, srcs):
+    """Ingest events appended since the last call to every log folder in srcs, reading only the new bytes (a keypress
+    must not re-read the whole log). -> number of new events."""
     new = 0
-    for f in glob.glob(os.path.join(d, "*", "events.ndjson")):
-        feat = os.path.basename(os.path.dirname(f)); size = os.path.getsize(f)
-        if f not in _seen:  # first look in this process: resume after what the DB already holds
-            done = con.execute("select coalesce(max(line),0) from events where feature=?", (feat,)).fetchone()[0]
-            c, off = _skip(f, done)
-            if c < done: con.execute("delete from events where feature=?", (feat,)); c = off = 0  # log replaced: reindex
-            _seen[f] = (c, off)
-        n, off = _seen[f]
-        if size < off: con.execute("delete from events where feature=?", (feat,)); n = off = 0  # log truncated: reindex
-        if size == off: _seen[f] = (n, off); continue
-        with open(f, "rb") as fh:
-            fh.seek(off)
-            for raw in fh:
-                whole = raw.endswith(b"\n")
-                try: e = json.loads(raw)
-                except ValueError:
-                    if not whole: break  # half-written tail: pick it up once the writer finishes it
-                    n += 1; off += len(raw); continue  # garbled line: skip, keep numbering
-                new += con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (feat, n + 1, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
-                     e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id"),
-                     e.get("ticket"), e.get("ticket_type"), e.get("title"),
-                     e.get("decided_by"), e.get("verdict"), e.get("codes"))).rowcount
-                if not whole: break  # complete JSON but no newline yet: keep it, re-read (and ignore the duplicate) later
-                n += 1; off += len(raw)
-        _seen[f] = (n, off)
+    for src in srcs:
+        repo = repo_name(src)
+        for f in glob.glob(os.path.join(src, "*", "events.ndjson")):
+            feat = os.path.basename(os.path.dirname(f))
+            try: size = os.path.getsize(f)
+            except OSError: continue
+            if f not in _seen:  # first look in this process: resume after what the DB already holds
+                done = con.execute("select coalesce(max(line),0) from events where src=? and feature=?", (src, feat)).fetchone()[0]
+                c, off = _skip(f, done)
+                if c < done: con.execute("delete from events where src=? and feature=?", (src, feat)); c = off = 0  # log replaced: reindex
+                _seen[f] = (c, off)
+            n, off = _seen[f]
+            if size < off: con.execute("delete from events where src=? and feature=?", (src, feat)); n = off = 0  # log truncated: reindex
+            if size == off: _seen[f] = (n, off); continue
+            with open(f, "rb") as fh:
+                fh.seek(off)
+                for raw in fh:
+                    whole = raw.endswith(b"\n")
+                    try: e = json.loads(raw)
+                    except ValueError:
+                        if not whole: break  # half-written tail: pick it up once the writer finishes it
+                        n += 1; off += len(raw); continue  # garbled line: skip, keep numbering
+                    new += con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (src, repo, feat, n + 1, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
+                         e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id"),
+                         e.get("ticket"), e.get("ticket_type"), e.get("title"),
+                         e.get("decided_by"), e.get("verdict"), e.get("codes"), e.get("plugin_version"))).rowcount
+                    if not whole: break  # complete JSON but no newline yet: keep it, re-read (and ignore the duplicate) later
+                    n += 1; off += len(raw)
+            _seen[f] = (n, off)
     con.commit()
     return new
 
 def features(con):
-    return con.execute("""select feature, min(ts) first, max(ts) last, count(*) n,
+    """One row per ticket per repo, newest first. fid(row) = (src, feature) identifies it."""
+    return con.execute("""select src, repo, feature, min(ts) first, max(ts) last, count(*) n,
         sum(type='question') q, sum(type='decision') d, sum(type='review_finding') r,
         sum(type='agent_started') st, sum(type in ('worker_done','question') and agent_id is not null and agent_id!='') en,
-        (select body from events x where x.feature=e.feature and type='feature_start' limit 1) request,
-        (select ticket from events x where x.feature=e.feature and x.ticket is not null and x.ticket!='' order by line desc limit 1) ticket,
-        (select ttype from events x where x.feature=e.feature and x.ttype is not null and x.ttype!='' order by line desc limit 1) ttype,
-        (select title from events x where x.feature=e.feature and x.title is not null and x.title!='' order by line desc limit 1) title
-        from events e group by feature order by last desc""").fetchall()
+        (select body from events x where x.src=e.src and x.feature=e.feature and type='feature_start' limit 1) request,
+        (select ticket from events x where x.src=e.src and x.feature=e.feature and x.ticket is not null and x.ticket!='' order by line desc limit 1) ticket,
+        (select ttype from events x where x.src=e.src and x.feature=e.feature and x.ttype is not null and x.ttype!='' order by line desc limit 1) ttype,
+        (select title from events x where x.src=e.src and x.feature=e.feature and x.title is not null and x.title!='' order by line desc limit 1) title
+        from events e group by src, feature order by last desc""").fetchall()
+
+def fid(f): return (f["src"], f["feature"])
 
 def status(f): return "running" if f["st"] > f["en"] else "idle"
 
@@ -111,7 +159,7 @@ def wrap_body(body, w, limit=None):
     return out, 0
 
 class Timeline:
-    """[(text, color)] for ONE feature at one width/filter, built incrementally: update() folds in only the events appended
+    """[(text, color)] for ONE ticket (fid = (src, feature)) at one width/filter, built incrementally: update() folds in only the events appended
     since the last call, so scrolling never re-wraps anything. Durations pair agent_started/stop by agent_id.
     marks = [(index into lines, event line)] of the collapsed bodies; `expanded` = event lines shown in full."""
     def __init__(s, feat, width, qa_only=False, expanded=(), everything=False):
@@ -120,7 +168,7 @@ class Timeline:
         s.last = 0; s.t0 = None; s.starts = {}; s.lines = []; s.marks = []
 
     def update(s, con):
-        rows = con.execute("select * from events where feature=? and line>? order by line", (s.feat, s.last)).fetchall()
+        rows = con.execute("select * from events where src=? and feature=? and line>? order by line", (*s.feat, s.last)).fetchall()
         for r in rows: s._add(r)
         if rows: s.last = rows[-1]["line"]
         return s.lines
@@ -172,14 +220,24 @@ def ticket_label(f):
     return f"[{tt + '-' if tt else ''}{tid}] {name}".rstrip()
 
 def feature_line(f, w):
-    lab = ticket_label(f); mark = "●" if status(f) == "running" else " "
-    if w < 72: return f"{mark} {lab}"  # split view: the ticket is all that fits
-    stats = f"{local(f['first'])}  ev:{f['n']:<3} ?:{f['q']:<2} ✔:{f['d']:<2} !:{f['r']}"
+    lab = ticket_label(f); mark = "●" if status(f) == "running" else " "; repo = f["repo"] or ""
+    if w < 72:  # split view: the ticket first, the repo on what is left
+        room = w - len(repo) - 4
+        return f"{mark} {lab:<{room}.{room}} {repo}" if room >= 24 else f"{mark} {lab}"
+    stats = f"{repo:<14.14} {local(f['first'])}  ev:{f['n']:<3} ?:{f['q']:<2} ✔:{f['d']:<2} !:{f['r']}"
     return f"{mark} {lab:<{w - len(stats) - 4}.{w - len(stats) - 4}}  {stats}"
 
-def dump(con, feat):
-    if feat: print("\n".join(t for t, _ in timeline(con, feat, 100))); return
-    for f in features(con): print(feature_line(f, 110))
+def dump(con, arg):
+    """No arg: the ticket list. 'ticket' or 'repo/ticket': that timeline (every match, headed when several)."""
+    fs = features(con)
+    if not arg:
+        for f in fs: print(feature_line(f, 110))
+        return
+    hit = [f for f in fs if arg in (f["feature"], f"{f['repo']}/{f['feature']}")]
+    if not hit: sys.exit(f"team-tui: no ticket {arg!r} (try: team-tui --dump)")
+    for f in hit:
+        if len(hit) > 1: print(f"== {f['repo']}/{f['feature']} ==")
+        print("\n".join(t for t, _ in timeline(con, fid(f), 100)))
 
 SCROLL_KEYS = {ord(c) for c in "jkbgG "} | {curses.KEY_DOWN, curses.KEY_UP, curses.KEY_NPAGE, curses.KEY_PPAGE, curses.KEY_HOME, curses.KEY_END}
 
@@ -216,21 +274,21 @@ def pos_label(top, view, total):
 KEYS_LIST = " j/k move  g/G first/last  enter open  c copy  q quit "
 KEYS_TICKET = " j/k scroll  space/b page  g/G top/end  o/O expand  n/p ticket  c copy  f Q&A  esc back  q quit "
 
-def ui(scr, con, d):
+def ui(scr, con, get_sources):
     curses.curs_set(0); curses.use_default_colors()
     for i in range(1, 7): curses.init_pair(i, i, -1)
     curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
     scr.timeout(2000)
     feat = None; sel = ltop = top = maxtop = view = 0; qa = False; follow = True; msg = ""
-    opened = {}      # feature -> event lines the user expanded with o
-    everything = set()  # features shown with every body expanded (O)
+    opened = {}      # ticket (fid) -> event lines the user expanded with o
+    everything = set()  # tickets (fid) shown with every body expanded (O)
     tl = tlkey = None
     fs = features(con); dirty = True
     while True:
-        if sync(con, d): fs = features(con); dirty = True
+        if sync(con, get_sources()): fs = features(con); dirty = True
         if dirty:  # redraw only when a key, a resize or a new event changed something; an idle tick costs one stat per log
             dirty = False; h, w = scr.getmaxyx(); scr.erase()
-            if not fs: scr.addstr(0, 0, f"no events in {d}   (q quit)")
+            if not fs: scr.addstr(0, 0, "no events yet: no repo has logged (run team-log in a repo, or: team-tui --add <repo>)   (q quit)")
             else:
                 sel = max(0, min(sel, len(fs) - 1)); lw = min(max(48, w // 3), w - 20) if feat else w
                 rows = h - 2 if feat else h - 3  # list view keeps its last row for the ticket's request text
@@ -242,13 +300,13 @@ def ui(scr, con, d):
                     attr = curses.A_REVERSE if ltop + i == sel else (curses.color_pair(2) if status(f) == "running" else 0)
                     scr.addstr(i + 1, 0, feature_line(f, lw).ljust(lw)[: lw - 1], attr)
                 if feat:
-                    cur = fs[sel]["feature"]; body_w = w - lw - 2
+                    cur = fid(fs[sel]); body_w = w - lw - 2
                     key = (cur, body_w, qa, frozenset(opened.get(cur, ())), cur in everything)
                     if key != tlkey: tl = Timeline(cur, body_w, qa, key[3], key[4]); tlkey = key
                     lines = tl.update(con)
                     view = h - 2; maxtop = max(0, len(lines) - view)
                     top = maxtop if follow else max(0, min(top, maxtop))
-                    scr.addstr(0, lw + 1, f" {ticket_label(fs[sel])}{'  [Q&A only]' if qa else ''} ".ljust(body_w)[:body_w], curses.color_pair(7))
+                    scr.addstr(0, lw + 1, f" {ticket_label(fs[sel])}  ({fs[sel]['repo']}){'  [Q&A only]' if qa else ''} ".ljust(body_w)[:body_w], curses.color_pair(7))
                     for i, (t, c) in enumerate(lines[top: top + view]):
                         scr.addstr(i + 1, lw + 1, t[:body_w], curses.color_pair(c) if c else 0)
                     status_line = f" {pos_label(top, view, len(lines))} |" + (f" {msg} |" if msg else "") + KEYS_TICKET
@@ -263,14 +321,14 @@ def ui(scr, con, d):
         msg = ""
         if k == 27 and feat: feat = None
         elif k == ord("c") and fs:
-            txt = "\n".join(t for t, _ in timeline(con, fs[sel]["feature"], 10**6, qa if feat else False))  # always the full text
+            txt = "\n".join(t for t, _ in timeline(con, fid(fs[sel]), 10**6, qa if feat else False))  # always the full text
             msg = f"copied {txt.count(chr(10)) + 1} lines via {copy_clip(txt)}"
         elif feat and k in SCROLL_KEYS: top, follow = scroll(k, top, follow, maxtop, max(1, view - 1))
         elif feat and k == ord("o"):  # expand the first collapsed body that is on screen
             hit = next((ev for idx, ev in tl.marks if top <= idx < top + view), None) if tl else None
-            if hit: opened.setdefault(fs[sel]["feature"], set()).add(hit); follow = False
+            if hit: opened.setdefault(fid(fs[sel]), set()).add(hit); follow = False
             else: msg = "nothing collapsed on screen"
-        elif feat and k == ord("O"): everything ^= {fs[sel]["feature"]}; follow = False
+        elif feat and k == ord("O"): everything ^= {fid(fs[sel])}; follow = False
         elif feat and k in (ord("n"), ord("p")): sel += 1 if k == ord("n") else -1; top = 0; follow = True
         elif feat and k in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT, ord("l")): pass  # already open: do not jump to the end
         elif k in (ord("g"), curses.KEY_HOME): sel = 0
@@ -281,7 +339,21 @@ def ui(scr, con, d):
         elif k == curses.KEY_LEFT or k == ord("h"): feat = None
         elif k == ord("f"): qa = not qa
 
+def query(con, sql):
+    """Read-only: a second connection opened mode=ro, so nothing typed here can change the index."""
+    ro = sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)
+    cur = ro.execute(sql)
+    print("\t".join(c[0] for c in cur.description))
+    for row in cur: print("\t".join("" if v is None else str(v).replace("\n", " ") for v in row))
+
 if __name__ == "__main__":
-    d = log_dir(); con = open_db(d); sync(con, d)
-    if len(sys.argv) > 1 and sys.argv[1] == "--dump": dump(con, sys.argv[2] if len(sys.argv) > 2 else None)
-    else: curses.wrapper(ui, con, d)
+    srcs = make_sources(); con = open_db(db_path()); a = sys.argv[1:]
+    if a[:1] == ["--add"]:
+        if len(a) < 2: sys.exit("usage: team-tui --add PATH")
+        print("registered", register(a[1])); sys.exit(0)
+    sync(con, srcs())
+    if a[:1] == ["--dump"]: dump(con, a[1] if len(a) > 1 else None)
+    elif a[:1] == ["--query"]:
+        if len(a) < 2: sys.exit("usage: team-tui --query SQL")
+        query(con, a[1])
+    else: curses.wrapper(ui, con, srcs)

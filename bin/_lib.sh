@@ -8,6 +8,21 @@ team_root() {
   dirname "$common"
 }
 
+# Shared index folder (~/.claude/agent-team): team.db + the list of repos whose .team-log it indexes. TEAM_HOME overrides (tests).
+team_home() { echo "${TEAM_HOME:-$HOME/.claude/agent-team}"; }
+
+# Remember this log folder so team-tui / team-retro can show it from anywhere. Never fails the caller: logging comes first.
+team_register() {
+  local dir="$1" reg; reg="$(team_home)/repos"
+  grep -qxF "$dir" "$reg" 2>/dev/null && return 0
+  { mkdir -p "$(team_home)" && printf '%s\n' "$dir" >> "$reg"; } 2>/dev/null || true
+}
+
+# Version of the plugin this script belongs to (stamped on every event, so a retro can compare before/after an upgrade).
+team_version() {
+  sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../.claude-plugin/plugin.json" 2>/dev/null | head -1 || true
+}
+
 # Feature slug: $TEAM_FEATURE > worktree name (.claude/worktrees/<name>) > <root>/.team-log/CURRENT > "default"
 team_feature() {
   local cwd="${1:-$PWD}" root
