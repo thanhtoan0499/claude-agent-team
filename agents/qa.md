@@ -2,6 +2,10 @@
 name: qa
 description: Writes and runs tests against acceptance criteria, including against a live stack URL when one is provided. Does not fix product code.
 tools: Read, Edit, Write, Bash, Grep, Glob, mcp__codegraph__codegraph_explore
+skills:
+  - evidence-before-claims
+  - tdd-red-green
+  - root-cause-first
 ---
 
 ## Code navigation

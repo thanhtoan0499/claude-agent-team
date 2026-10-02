@@ -43,6 +43,13 @@ involved) and spawn `bin/team-ticket`, which fetches the type and title from Azu
 delayed; org from the URL or `TEAM_ADO_ORG`). Meanwhile the master reads the ticket and logs the same metadata (`ticket_info`); the TUI shows
 the latest. If `az` is missing or not logged in, the master's entry is the only source.
 
+## Role skills (v0.1.8+)
+Agents get role discipline from small skills preloaded through the agent's `skills:` frontmatter (full text injected at start, so each is
+kept short: <= 100 lines per skill, <= 340 per agent; `bash tests/test_skills.sh` enforces it). Repo-specific knowledge is NOT copied in:
+the master points agents at the repo's own files (CLAUDE.md, `.claude/rules/`, `.claude/agents/<role>.md`) in the brief.
+Adapted third-party material and licences: `THIRD_PARTY.md`. A wrong skill name in `skills:` is skipped silently by Claude Code, so after
+changing wiring run `bash tests/smoke_preload.sh` (manual, costs a few cents) to see which skills the agent really received.
+
 ## Log
 `<repo>/.team-log/<feature>/events.ndjson`, one JSON per line. Worktrees share the main repo's log; the
 worktree name is the feature slug.

@@ -2,6 +2,11 @@
 name: backend
 description: Implements the backend part of a task inside the contract the planner froze. Use after planner.
 tools: Read, Edit, Write, Bash, Grep, Glob, mcp__codegraph__codegraph_explore
+skills:
+  - evidence-before-claims
+  - tdd-red-green
+  - root-cause-first
+  - receiving-findings
 ---
 
 ## Code navigation

@@ -2,6 +2,8 @@
 name: reviewer
 description: Read-only review of the full diff against the contract and project rules. Use last.
 tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore
+skills:
+  - evidence-before-claims
 ---
 
 ## Code navigation
