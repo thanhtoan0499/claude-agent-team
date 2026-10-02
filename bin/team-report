@@ -9,8 +9,14 @@ jq -r '
   "\(.ts[11:19]) [\(.type)] " +
   (if .from and .to then "\(.from) -> \(.to)" elif .from then .from elif .to then "-> \(.to)" else "" end) +
   (if .task then " (\(.task))" else "" end) +
+  (if .decided_by then " [decided by \(.decided_by)]" else "" end) +
+  (if .verdict then " \(.verdict)" + (if .codes then " (\(.codes))" else "" end) else "" end) +
   (if .body then "\n    \(.body | gsub("\n";" ") | .[0:2000])" else "" end) +
   (if .options then "\n    options: \(.options|join(" | "))" else "" end) +
   (if .rationale then "\n    WHY: \(.rationale)" else "" end) +
   (if .ref then "\n    ref: \(.ref)" else "" end) end' "$f"
 echo "--- $(wc -l < "$f") events | questions: $(jq -s 'map(select(.type=="question"))|length' "$f") | decisions: $(jq -s 'map(select(.type=="decision"))|length' "$f") | escalations: $(jq -s 'map(select(.type=="escalation"))|length' "$f") | errors: $(jq -s 'map(select(.type=="error"))|length' "$f")"
+jq -rs '[.[]|select(.type=="gate")] as $g | [.[]|select(.type=="decision")] as $d
+  | if ($g|length)+($d|length) == 0 then empty else
+    "--- gate: DECIDE \([$g[]|select(.verdict=="DECIDE")]|length) | ASSUME \([$g[]|select(.verdict=="ASSUME")]|length) | ESCALATE \([$g[]|select(.verdict=="ESCALATE")]|length)"
+    + " | decided by: master \([$d[]|select(.decided_by=="master")]|length) / user \([$d[]|select(.decided_by=="user")]|length) / policy \([$d[]|select(.decided_by=="policy")]|length)" end' "$f"

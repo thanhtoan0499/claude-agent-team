@@ -95,7 +95,8 @@ fc=.team-log/conc/events.ndjson
 # ---- v0.1.5: master/user events captured by hook, CURRENT lifecycle, ms timestamps, ref ----
 "$B/team-log" feature_start --body "v5" --feature v5
 f5=.team-log/v5/events.ndjson
-M() { echo "$1" | "$B/team-hook"; }
+M() { echo "$1" | "$B/team-hook" >/dev/null; }     # quiet
+MO() { echo "$1" | "$B/team-hook"; }                 # keeps the hook's stdout (policy card JSON)
 M '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'","prompt":"cho mình xem plan"}'
 M '{"hook_event_name":"PreToolUse","cwd":"'"$T"'","tool_name":"Agent","tool_input":{"subagent_type":"agent-team:planner","description":"plan it","prompt":"Plan the fix for X"}}'
 M '{"hook_event_name":"PreToolUse","cwd":"'"$T"'","tool_name":"SendMessage","tool_input":{"to":"planner","message":"decision: A","summary":"s"}}'
@@ -173,5 +174,70 @@ PATH="$T/fakebin:$PATH" M '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'",
 [ "$(head -1 .team-log/CURRENT)" = "wi-8124" ] || { echo "FAIL: second ticket did not switch feature"; exit 1; }
 # team-ticket is silent without az
 PATH=/usr/bin:/bin "$B/team-ticket" 8124 >/dev/null 2>&1; true
+# ---- v0.1.7: team-gate, decided_by, policy card, plan.md ----
+"$B/team-log" feature_start --feature g7 --body "gate tests"; f7=.team-log/g7/events.ndjson
+G() { "$B/team-gate" --no-log "$@"; }   # prints verdict line + next:, rc = 0 decide/assume, 1 escalate
+base=(--topic q --in-ticket y --reversible y --external n --security n --needs-human n)
+v() { G "$@" 2>/dev/null | head -1; }
+[ "$(v "${base[@]}")" = "DECIDE" ] || { echo "FAIL: gate plain DECIDE"; exit 1; }
+[ "$(v --topic q --in-ticket n --reversible y --external n --security n --needs-human n)" = "ESCALATE OUT_OF_SCOPE" ] || { echo "FAIL: gate OUT_OF_SCOPE"; exit 1; }
+[ "$(v --topic q --in-ticket y --reversible n --external y --security y --needs-human n)" = "ESCALATE IRREVERSIBLE,EXTERNAL_EFFECT,SECURITY" ] || { echo "FAIL: gate multi codes"; exit 1; }
+[ "$(v --topic q --in-ticket y --reversible y --external n --security n --needs-human y)" = "ESCALATE NEEDS_HUMAN_INFO" ] || { echo "FAIL: gate needs-human"; exit 1; }
+[ "$(v --topic q --in-ticket y --reversible y --external n --security n --needs-human y --placeholder y)" = "ASSUME ASSUMED_PLACEHOLDER" ] || { echo "FAIL: gate placeholder -> ASSUME"; exit 1; }
+# a placeholder never rescues an out-of-scope / irreversible question
+[ "$(v --topic q --in-ticket n --reversible y --external n --security n --needs-human y --placeholder y)" = "ESCALATE OUT_OF_SCOPE,ASSUMED_PLACEHOLDER" ] || { echo "FAIL: placeholder must not rescue"; exit 1; }
+G "${base[@]}" >/dev/null; [ $? = 0 ] || { echo "FAIL: rc decide"; exit 1; }
+rc=0; G --topic q --in-ticket n --reversible y --external n --security n --needs-human n >/dev/null || rc=$?; [ "$rc" = 1 ] || { echo "FAIL: rc escalate=$rc"; exit 1; }
+rc=0; G --topic q --in-ticket y >/dev/null 2>&1 || rc=$?; [ "$rc" = 2 ] || { echo "FAIL: missing facts must be misuse (rc=$rc)"; exit 1; }
+rc=0; G "${base[@]}" --bogus x >/dev/null 2>&1 || rc=$?; [ "$rc" = 2 ] || { echo "FAIL: unknown flag rc=$rc"; exit 1; }
+rc=0; G "${base[@]/in-ticket/in-tickt}" >/dev/null 2>&1 || rc=$?; [ "$rc" = 2 ] || { echo "FAIL: typo flag rc=$rc"; exit 1; }
+# logging: gate event written; --no-log writes nothing
+n=$(wc -l < $f7); G "${base[@]}" >/dev/null; [ "$(wc -l < $f7)" = "$n" ] || { echo "FAIL: --no-log wrote"; exit 1; }
+"$B/team-gate" --topic "scope A vs B" --in-ticket y --reversible y --external n --security n --needs-human n --to planner >/dev/null
+jq -s -e 'map(select(.type=="gate" and .verdict=="DECIDE" and .body=="scope A vs B" and .from=="master" and .to=="planner"))|length==1' $f7 >/dev/null || { echo "FAIL: gate event not logged"; exit 1; }
+# decision default decided_by=master, explicit user/policy kept, junk refused, only valid on decision
+"$B/team-log" decision --from master --to planner --task t1 --body "A" --rationale "r1"
+"$B/team-log" decision --from master --to planner --task t1 --decided-by user --body "B" --rationale "r2"
+jq -s -e '[.[]|select(.type=="decision")|.decided_by]==["master","user"]' $f7 >/dev/null || { echo "FAIL: decided_by values"; exit 1; }
+! "$B/team-log" decision --body x --rationale y --decided-by robot 2>/dev/null || { echo "FAIL: bad decided_by accepted"; exit 1; }
+! "$B/team-log" note --body x --decided-by user 2>/dev/null || { echo "FAIL: decided_by on a note accepted"; exit 1; }
+! "$B/team-log" gate --body x --verdict MAYBE 2>/dev/null || { echo "FAIL: bad verdict accepted"; exit 1; }
+! "$B/team-log" gate --verdict DECIDE 2>/dev/null || { echo "FAIL: gate without topic accepted"; exit 1; }
+# round limit: two decisions already went to planner/t1 -> the 3rd is refused; other task or agent is not
+[ "$(G "${base[@]}" --to planner --task t1 | head -1)" = "ESCALATE ROUND_LIMIT" ] || { echo "FAIL: ROUND_LIMIT"; exit 1; }
+[ "$(G "${base[@]}" --to planner --task t2 | head -1)" = "DECIDE" ] || { echo "FAIL: ROUND_LIMIT leaked across tasks"; exit 1; }
+[ "$(G "${base[@]}" --to backend --task t1 | head -1)" = "DECIDE" ] || { echo "FAIL: ROUND_LIMIT leaked across agents"; exit 1; }
+# report + tui understand the new fields
+r=$("$B/team-report" g7); grep -q "decided by user" <<<"$r" && grep -q "gate: DECIDE" <<<"$r" && grep -q "decided by: master 1 / user 1 / policy 0" <<<"$r" || { echo "FAIL: report gate/decided_by: $r"; exit 1; }
+rm -f .team-log/team.db; "$B/team-tui" --dump g7 >/dev/null || { echo "FAIL: tui with gate events"; exit 1; }
+# policy card: SessionStart + every 6th prompt, only for the active feature's main thread
+SS='{"hook_event_name":"SessionStart","source":"compact","cwd":"'"$T"'"}'
+out=$(echo "$SS" | "$B/team-hook")
+jq -e '.hookSpecificOutput.hookEventName=="SessionStart" and (.hookSpecificOutput.additionalContext|test("MASTER of feature g7")) and (.hookSpecificOutput.additionalContext|test("team-gate")) and (.hookSpecificOutput.additionalContext|test("plan.md"))' <<<"$out" >/dev/null || { echo "FAIL: SessionStart card: $out"; exit 1; }
+! grep -q '{{' <<<"$out" || { echo "FAIL: card placeholders left"; exit 1; }
+cards=""; for i in 1 2 3 4 5 6 7 8; do o=$(MO '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'","prompt":"p'$i'"}'); if [ -n "$o" ]; then cards="${cards}C"; else cards="${cards}."; fi; done
+[ "$cards" = "C.....C." ] || { echo "FAIL: card cadence '$cards' (want C.....C.)"; exit 1; }
+jq -e '.hookSpecificOutput.hookEventName=="UserPromptSubmit"' <<<"$(M '{"hook_event_name":"SessionStart","cwd":"'"$T"'"}'; MO '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'","prompt":"after reset"}')" >/dev/null || { echo "FAIL: SessionStart did not reset the cadence"; exit 1; }
+[ -z "$(echo '{"hook_event_name":"SessionStart","agent_id":"x1","agent_type":"agent-team:qa","cwd":"'"$T"'"}' | "$B/team-hook")" ] || { echo "FAIL: card leaked to a subagent"; exit 1; }
+"$B/team-log" feature_end --feature g7
+[ -z "$(echo "$SS" | "$B/team-hook")" ] || { echo "FAIL: card with no active feature"; exit 1; }
+# planner report -> plan.md (latest wins), for NEEDS_DECISION too
+"$B/team-log" feature_start --feature p7 --body x
+echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:planner","agent_id":"pl1","cwd":"'"$T"'","last_assistant_message":"T1 do x\nDONE"}' | "$B/team-hook"
+grep -q "T1 do x" .team-log/p7/plan.md || { echo "FAIL: plan.md not saved"; exit 1; }
+echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:planner","agent_id":"pl1","cwd":"'"$T"'","last_assistant_message":"T2 redo\nNEEDS_DECISION"}' | "$B/team-hook"
+grep -q "T2 redo" .team-log/p7/plan.md && ! grep -q "T1 do x" .team-log/p7/plan.md || { echo "FAIL: plan.md not replaced"; exit 1; }
+echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:backend","agent_id":"b9","cwd":"'"$T"'","last_assistant_message":"DONE not a plan"}' | "$B/team-hook"
+! grep -q "not a plan" .team-log/p7/plan.md || { echo "FAIL: non-planner overwrote plan.md"; exit 1; }
+# scenario replay (bug 8991, the 4 open questions that used to stall the run): only the plan approval should reach the user
+rm -rf .team-log/s8991; "$B/team-log" feature_start --feature s8991 --body "replay"
+S() { "$B/team-gate" --to planner --task plan "$@" | head -1 || true; }   # rc 1 (ESCALATE) must not kill the test under pipefail
+a=$(S --topic "scope: actor-only FE fix (A) vs realtime (B/C)" --in-ticket y --reversible y --external n --security n --needs-human n)
+b=$(S --topic "remove snapshot tiles the new pack no longer declares" --in-ticket y --reversible y --external n --security n --needs-human n)
+c=$(S --topic "workspace: worktree fix/8991-*" --in-ticket y --reversible y --external n --security n --needs-human n)
+d=$(S --topic "BA copy for the Activate disclaimer" --in-ticket y --reversible y --external n --security n --needs-human y --placeholder y)
+e=$(S --topic "also push realtime to every viewer (scope C)" --in-ticket n --reversible y --external n --security n --needs-human n)
+[ "$a|$b|$c|$d|$e" = "DECIDE|DECIDE|DECIDE|ASSUME ASSUMED_PLACEHOLDER|ESCALATE OUT_OF_SCOPE" ] || { echo "FAIL: 8991 replay: $a|$b|$c|$d|$e"; exit 1; }
+jq -s -e '[.[]|select(.type=="gate")]|length==5 and ([.[]|select(.verdict=="ESCALATE")]|length)==1' .team-log/s8991/events.ndjson >/dev/null || { echo "FAIL: 8991 replay log"; exit 1; }
 unset TEAM_HOOK_RETRIES
 echo PASS

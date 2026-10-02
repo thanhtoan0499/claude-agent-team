@@ -13,6 +13,9 @@
 #       and a detached `team-ticket` that fetches type+title from Azure DevOps in the background (never blocks
 #       the prompt). The master agent logs the same metadata itself (skill step 0): hook = fast + exact id,
 #       agent = understands the ticket; the TUI shows whichever ticket_info arrives last.
+#   SessionStart (startup|resume|clear|compact) and every 6th UserPromptSubmit -> prints the master's POLICY CARD
+#     (skills/team-lead/references/policy-card.md) as additionalContext, so the decision policy survives a
+#     compaction instead of living only in the first message of the session. ~150 tokens; only while a feature is active.
 #   PreToolUse  Agent|Task|SendMessage -> task_assigned (the master's brief, verbatim)
 #   PreToolUse  AskUserQuestion        -> escalation    (questions + options)
 #   PostToolUse AskUserQuestion        -> user_reply    (the answers)
@@ -22,7 +25,8 @@
 # leaves that field empty, so the report is read from the subagent transcript (fallback chain below).
 # Payload field names are read defensively (several candidates each) because the hook schemas are only partly
 # documented; TEAM_HOOK_DEBUG=<file> appends every raw payload to that file so a missing event can be diagnosed.
-# Never blocks, never prints: always exits 0.
+# SubagentStop of the planner also saves its report as .team-log/<feature>/plan.md: the plan survives compaction on disk.
+# Never blocks; prints only the policy-card JSON above; always exits 0.
 trap 'exit 0' ERR
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "$DIR/_lib.sh"
@@ -31,7 +35,7 @@ in=$(cat)
 # Cheap prefilter: this hook fires for EVERY prompt and tool call of the session. Skip the jq spawns unless the
 # payload mentions something we log (precise checks follow).
 case "$in" in
-  *agent-team:*|*UserPromptSubmit*|*AskUserQuestion*|*SendMessage*|*'"Agent"'*|*'"Task"'*) ;;
+  *agent-team:*|*UserPromptSubmit*|*SessionStart*|*AskUserQuestion*|*SendMessage*|*'"Agent"'*|*'"Task"'*) ;;
   *) exit 0 ;;
 esac
 ev=$(jq -r '.hook_event_name // empty' <<<"$in")
@@ -72,6 +76,12 @@ err_text() {
   J '(.error // .tool_response.error // .error_message // .tool_response // "failed") | tostring | gsub("[\n\r\t]+";" ") | .[0:500]'
 }
 
+# Planner report -> <feature dir>/plan.md (latest wins). The master re-reads it after a compaction.
+save_plan() {
+  local f; f=$( cd "$cwd" && team_log_file ) || return 0
+  { printf '<!-- planner report, %s -->\n' "$(date -u +%FT%TZ)"; printf '%s\n' "${1:0:$MAX}"; } > "$(dirname "$f")/plan.md" 2>/dev/null || true
+}
+
 team_agent_event() {
   local tool tp msg rep tries
   case "$ev" in
@@ -89,6 +99,7 @@ team_agent_event() {
         [ "$tries" -le 0 ] && break
         tries=$((tries - 1)); sleep 0.4              # transcript is written asynchronously: wait for the flush
       done
+      if [ "$agent" = agent-team:planner ] && [ -n "$msg" ]; then save_plan "$msg"; fi
       if grep -qE '^[[:space:]]*NEEDS_DECISION[[:space:]]*:?[[:space:]]*$' <<<"$msg"; then
         log question --from "$agent" --agent-id "$id" --body "${msg:0:$MAX}" ${tp:+--ref "$tp"}
       else
@@ -124,6 +135,25 @@ auto_start_feature() {
   ( cd "$cwd" && nohup "$DIR/team-ticket" "$tid" ${url:+"$url"} >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
 }
 
+# Policy card as hook context. Dynamic bits: feature, plan path, counts of gates/escalations so far.
+emit_card() {
+  local card="$DIR/../skills/team-lead/references/policy-card.md" feat f plan stats esc
+  [ -r "$card" ] || return 0
+  feat=$( cd "$cwd" && team_feature ); f=$( cd "$cwd" && team_log_file ); plan="$(dirname "$f")/plan.md"
+  [ -s "$plan" ] || plan="(not written yet: the planner's report becomes $plan)"
+  esc=0; [ -s "$f" ] && esc=$(grep -c '"type":"escalation"' "$f" || true)
+  stats="user asked $esc time(s) so far."
+  card=$(<"$card"); card=${card//\{\{FEATURE\}\}/$feat}; card=${card//\{\{PLAN\}\}/$plan}; card=${card//\{\{STATS\}\}/$stats}
+  jq -cn --arg ev "$ev" --arg c "$card" '{hookSpecificOutput:{hookEventName:$ev,additionalContext:$c}}'
+}
+
+# Every 6th user prompt of the active feature (1st, 7th, ...): counter lives next to the log, reset by SessionStart.
+card_due() {
+  local f cnt n; f=$( cd "$cwd" && team_log_file ); cnt="$(dirname "$f")/.card_n"
+  n=$(cat "$cnt" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$cnt" 2>/dev/null || true
+  [ $(( (n - 1) % 6 )) -eq 0 ]
+}
+
 master_event() {
   local tool to desc body q
   [ -z "$id" ] || return 0                           # subagent calls are handled above; this is the main thread
@@ -131,11 +161,16 @@ master_event() {
     body=$(J '.prompt // .user_prompt // empty'); [ -z "$body" ] || auto_start_feature "$body"
   fi
   feature_active || return 0
+  if [ "$ev" = SessionStart ]; then
+    { f=$( cd "$cwd" && team_log_file ); echo 0 > "$(dirname "$f")/.card_n"; } 2>/dev/null || true
+    emit_card; return 0
+  fi
   tool=$(J '.tool_name // empty')
   case "$ev:$tool" in
     UserPromptSubmit:*)
       body=$(J '.prompt // .user_prompt // empty')
-      [ -n "$body" ] && log user_reply --from user --to master --body "${body:0:$MAX}" ;;
+      [ -n "$body" ] && log user_reply --from user --to master --body "${body:0:$MAX}"
+      card_due && emit_card ;;
     PreToolUse:Agent|PreToolUse:Task)
       to=$(J '.tool_input.subagent_type // "general-purpose"')
       desc=$(J '.tool_input.description // empty')

@@ -18,6 +18,20 @@ Flow: `planner` (contract, you approve) → `designer` → `backend` ∥ `fronte
 Agents never guess: they end with `NEEDS_DECISION` (question + options + recommendation); the master answers
 with a **mandatory rationale** and resumes the same agent via `SendMessage`. Max 2 rounds, then escalate.
 
+## The master decides (v0.1.7)
+The master is built to decide, not to ask. You are asked **once per phase**: one `AskUserQuestion` = plan approval + only the
+questions that truly need you (recommended option first).
+- **`bin/team-gate`** — the master states five facts per open question (in-ticket, reversible, external, security, needs-human);
+  the script returns `DECIDE` / `ASSUME` / `ESCALATE` + reason codes and logs a `gate` event. The policy is code, not mood
+  (pattern from coscc). A 3rd decision round for one agent+task is refused (`ROUND_LIMIT`).
+- **`decided_by`** on every `decision` (`master` / `user` / `policy`): "accepted" by an agent is never shown as your approval.
+- **Policy card** — the hook re-injects a ~270-token reminder of the policy as context on `SessionStart` (incl. after a compaction)
+  and every 6th prompt of the active feature, so the rules do not live only in the first message (pattern from claude-delegation).
+- **`plan.md`** — the planner's report is saved to `.team-log/<feature>/plan.md` by the hook; after a compaction the master re-reads the file.
+- **Triage S/M/L**, a standard **delegation brief**, and an **escalation ladder** (R1 builder → R2 diagnosis → R3 ask you) live in
+  `skills/team-lead/references/`. The planner now returns `OPEN_QUESTIONS` (each with `blocking`, recommendation, default) and `ASSUMPTIONS`.
+- `team-report` ends with the gate verdict counts and decisions by decider, so `team-retro` can measure how often the user was needed.
+
 ## Naming: ticket number first
 A feature that tracks a ticket is named `<type>-<ticket>-<title-slug>` (e.g. `bug-8991-fe-serving-activate-version-moi-ghi-de-admin-layout`)
 and `team-tui` shows it as `[bug-8991] <title>`, so tickets are easy to scan and pick. Older logs without metadata are labelled from the
@@ -35,7 +49,8 @@ worktree name is the feature slug.
 
 | type | written by |
 |---|---|
-| `feature_start`, `feature_end`, `ticket_info`, `decision`, `review_finding`, `stack_provisioned`, `note` | master via `team-log` |
+| `feature_start`, `feature_end`, `ticket_info`, `decision` (+`decided_by`), `review_finding`, `stack_provisioned`, `note` | master via `team-log` |
+| `gate` (verdict + codes for one open question) | `team-gate` |
 | `agent_started`, `worker_done`, `question` | `SubagentStart/Stop` hook. Body = the agent's FULL final report (read from the subagent transcript when the agent ends via `SubagentHandback`); a `NEEDS_DECISION` line makes it a `question`; `ref` = path of the agent's transcript |
 | `tool_call`, `error` | `PostToolUse` / `PostToolUseFailure` hook for agent-team agents (one line per call) |
 | `task_assigned` (master's brief), `escalation` (question to the user), `user_reply` (user prompt / answer), `error` (failed Agent/SendMessage/AskUserQuestion) | main-thread hooks (`PreToolUse` Agent/SendMessage/AskUserQuestion, `UserPromptSubmit`, `PostToolUse(Failure)`), **only while a feature is active**: `.team-log/CURRENT` set by `feature_start`, refreshed by every event, expires after 12 h idle, cleared by `feature_end` |

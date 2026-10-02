@@ -19,9 +19,10 @@ def open_db(d):
     os.makedirs(d, exist_ok=True)
     con = sqlite3.connect(os.path.join(d, "team.db")); con.row_factory = sqlite3.Row
     cols = [r[1] for r in con.execute("pragma table_info(events)")]
-    if cols and "ticket" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
+    if cols and "verdict" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
     con.execute("""create table if not exists events(feature text, line int, ts text, type text, frm text, dst text,
         task text, body text, rationale text, options text, agent_id text, ticket text, ttype text, title text,
+        decided_by text, verdict text, codes text,
         primary key(feature, line))""")
     return con
 
@@ -34,10 +35,11 @@ def sync(con, d):  # append-only logs: ingest only lines beyond what the DB alre
                 if n <= done: continue
                 try: e = json.loads(raw)
                 except ValueError: continue  # torn/garbled line: skip, keep numbering
-                con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (feat, n, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
                      e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id"),
-                     e.get("ticket"), e.get("ticket_type"), e.get("title")))
+                     e.get("ticket"), e.get("ticket_type"), e.get("title"),
+                     e.get("decided_by"), e.get("verdict"), e.get("codes")))
     con.commit()
 
 def features(con):
@@ -57,10 +59,10 @@ def mmss(sec): return f"{int(sec)//60:02d}:{int(sec)%60:02d}"
 
 ICON = {"feature_start": "▶", "task_assigned": "→", "question": "?", "decision": "✔", "agent_started": "·",
         "worker_done": "■", "review_finding": "!", "stack_provisioned": "◆", "note": "·",
-        "escalation": "⇧", "user_reply": "↩", "error": "✖", "tool_call": "·", "feature_end": "■", "ticket_info": "#"}
+        "escalation": "⇧", "user_reply": "↩", "error": "✖", "tool_call": "·", "feature_end": "■", "ticket_info": "#", "gate": "⚖"}
 COLOR = {"question": 3, "decision": 2, "review_finding": 1, "task_assigned": 6, "worker_done": 4, "feature_start": 5,
-         "escalation": 3, "user_reply": 5, "error": 1}
-QA = {"question", "decision", "review_finding", "escalation", "user_reply", "error"}
+         "escalation": 3, "user_reply": 5, "error": 1, "gate": 3}
+QA = {"question", "decision", "review_finding", "escalation", "user_reply", "error", "gate"}
 
 def timeline(con, feat, width, qa_only=False):
     """-> [(text, color)] ; durations pair agent_started/stop by agent_id."""
@@ -79,7 +81,9 @@ def timeline(con, feat, width, qa_only=False):
             out.append((f"+{mmss((t - t0).total_seconds())} · {who}: {(r['body'] or '')[:w]}", 0)); continue
         if r["dst"]: who = f"{who}→{r['dst']}" if who else f"→{r['dst']}"
         head = f"+{mmss((t - t0).total_seconds())} {ICON.get(r['type'], '·')} {r['type']} {who}" + \
-               (f" [{r['task']}]" if r["task"] else "") + dur
+               (f" [{r['task']}]" if r["task"] else "") + dur + \
+               (f" [by {r['decided_by']}]" if r["decided_by"] else "") + \
+               (f" {r['verdict']}" + (f" ({r['codes']})" if r["codes"] else "") if r["verdict"] else "")
         c = COLOR.get(r["type"], 0)
         out.append((head, c))
         if r["type"] == "agent_started": continue

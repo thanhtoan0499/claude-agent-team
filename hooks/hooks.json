@@ -1,7 +1,10 @@
 {
-  "description": "Log everything the team does without relying on the LLM: subagent lifecycle + full final reports + tool calls/errors, and (while a feature is active) the master's briefs, its questions to the user, and the user's answers",
+  "description": "Log everything the team does without relying on the LLM: subagent lifecycle + full final reports + tool calls/errors, and (while a feature is active) the master's briefs, its questions to the user, the user's answers, and the master's policy card after a compaction",
   "hooks": {
     "SubagentStart": [
+      { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+    ],
+    "SessionStart": [
       { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
     ],
     "SubagentStop": [

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Deterministic "decide it myself or ask the user?" verdict for ONE open question. The master states five facts;
+# this script, not the LLM's mood, applies the policy (skills/team-lead/references/decision-policy.md) and logs a `gate` event.
+#
+# usage: team-gate --topic TEXT --in-ticket y|n --reversible y|n --external y|n --security y|n --needs-human y|n
+#                  [--placeholder y|n] [--to AGENT] [--task T] [--no-log]
+#   in-ticket    the answer stays inside the ticket's acceptance criteria / approved contract
+#   reversible   changing it later is cheap (a code edit, not a migration, a push, a deploy)
+#   external     it acts outside the working tree: push, deploy, ADO/Jira write, prod data, spend, paid API
+#   security     auth, tenant isolation, secrets, permissions, PII
+#   needs-human  the answer exists only in someone's head (BA copy, business rule, customer choice)
+#   placeholder  with needs-human=y: work can proceed on a clearly flagged placeholder (default n)
+#   --to         the agent that asked; with it, a 3rd decision for the same agent (and --task) is refused: ROUND_LIMIT
+# stdout line 1 (machine-readable): "<VERDICT> <CODE,CODE>"   VERDICT = DECIDE | ASSUME | ESCALATE
+#   DECIDE    decide it yourself: log `decision --decided-by master|policy` with a rationale
+#   ASSUME    proceed on the placeholder, flag it as an assumption in the plan shown to the user
+#   ESCALATE  goes into the ONE batched AskUserQuestion; never ask it alone
+# exit: 0 DECIDE|ASSUME, 1 ESCALATE, 2 misuse.   Codes: OUT_OF_SCOPE IRREVERSIBLE EXTERNAL_EFFECT SECURITY
+#   NEEDS_HUMAN_INFO ROUND_LIMIT (escalate) ASSUMED_PLACEHOLDER (assume)
+set -euo pipefail
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "$DIR/_lib.sh"
+topic= in_ticket= reversible= external= security= needs_human= placeholder=n to= task= nolog=
+die() { echo "team-gate: $*" >&2; exit 2; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-log) nolog=1; shift; continue;;
+    --topic) topic=${2-};; --in-ticket) in_ticket=${2-};; --reversible) reversible=${2-};; --external) external=${2-};;
+    --security) security=${2-};; --needs-human) needs_human=${2-};; --placeholder) placeholder=${2-};;
+    --to) to=${2-};; --task) task=${2-};;
+    *) die "unknown flag $1";;
+  esac; shift 2 || die "flag needs a value"
+done
+[ -n "$topic" ] || die "--topic is required"
+yn() { case "$2" in y|n) ;; *) die "--$1 must be y or n (it is required: state every fact explicitly)";; esac; }
+yn in-ticket "$in_ticket"; yn reversible "$reversible"; yn external "$external"; yn security "$security"; yn needs-human "$needs_human"
+yn placeholder "$placeholder"
+
+esc=() asm=()
+[ "$in_ticket" = n ]   && esc+=(OUT_OF_SCOPE)
+[ "$reversible" = n ]  && esc+=(IRREVERSIBLE)
+[ "$external" = y ]    && esc+=(EXTERNAL_EFFECT)
+[ "$security" = y ]    && esc+=(SECURITY)
+if [ "$needs_human" = y ]; then
+  if [ "$placeholder" = y ]; then asm+=(ASSUMED_PLACEHOLDER); else esc+=(NEEDS_HUMAN_INFO); fi
+fi
+if [ -n "$to" ]; then  # decision rounds already given to this agent (for this task): the 3rd means the task is mis-specified
+  f=$(team_log_file)
+  n=0; [ -s "$f" ] && n=$(jq -s --arg to "$to" --arg task "$task" \
+    '[.[] | select(.type=="decision" and .to==$to and ($task=="" or .task==$task))] | length' "$f" 2>/dev/null || echo 0)
+  [ "$n" -ge 2 ] && esc+=(ROUND_LIMIT)
+fi
+
+join() { local IFS=,; echo "$*"; }
+if [ ${#esc[@]} -gt 0 ]; then verdict=ESCALATE; codes=$(join "${esc[@]}" ${asm[@]+"${asm[@]}"}); rc=1
+elif [ ${#asm[@]} -gt 0 ]; then verdict=ASSUME; codes=$(join "${asm[@]}"); rc=0
+else verdict=DECIDE; codes=; rc=0; fi
+echo "$verdict${codes:+ $codes}"
+case "$verdict" in
+  DECIDE)   echo "next: decide, then team-log decision --from master${to:+ --to $to} --decided-by master --body ... --rationale '<why, what was rejected>'";;
+  ASSUME)   echo "next: use a flagged placeholder; list it under ASSUMPTIONS in the plan you show the user";;
+  ESCALATE) echo "next: add to the ONE batched AskUserQuestion (recommended option first); never ask it on its own";;
+esac
+if [ -z "$nolog" ]; then
+  "$DIR/team-log" gate --from master ${to:+--to "$to"} ${task:+--task "$task"} --body "$topic" --verdict "$verdict" ${codes:+--codes "$codes"} || true
+fi
+exit $rc
