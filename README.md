@@ -33,7 +33,7 @@ bin/team-report [feature]     # timeline: who asked what, what master decided an
 /agent-team:team-retro        # find repeated questions / reversed decisions → improve agent prompts
 bash tests/test_log.sh        # self-check
 ```
-`team-tui` keys: j/k move · enter open · f Q&A-only · G follow · g/PgUp/PgDn scroll · esc back · q quit.
+`team-tui` keys: j/k move (list) or scroll (inside a ticket) · space/b page · g/G top/end · n/p next/prev ticket · c copy timeline (wl-copy, xclip, else OSC52) · f Q&A-only · enter open · esc back · q quit.
 NDJSON is the source of truth; `.team-log/team.db` (SQLite) is a derived index rebuilt incrementally, safe to delete.
 
 `team-log` refuses a `decision` without `--rationale`, a `question` without `--from`, a `task_assigned` without `--to`/`--body`.

@@ -25,4 +25,19 @@ mkdir -p .claude/worktrees/wt1; ( cd .claude/worktrees/wt1 && "$B/team-log" note
 out=$("$B/team-tui" --dump demo); grep -q "WHY: matches existing ids" <<<"$out" || { echo "FAIL: tui rationale"; exit 1; }
 grep -q "NEEDS_DECISION" <<<"$out" || { echo "FAIL: tui question"; exit 1; }
 [ -s .team-log/team.db ] || { echo "FAIL: sqlite index"; exit 1; }
+# in-ticket scrolling: j/k move the log, not the ticket list
+python3 - "$B/team-tui" <<'PY'
+import importlib.machinery as im, importlib.util as iu, sys
+l = im.SourceFileLoader("tt", sys.argv[1]); m = iu.module_from_spec(iu.spec_from_loader("tt", l)); l.exec_module(m)
+S, o = m.scroll, ord
+assert S(o("j"), 5, False, 10, 17) == (6, False)
+assert S(o("j"), 10, True, 10, 17) == (10, True)
+assert S(o("k"), 10, True, 10, 17) == (9, False)
+assert S(o("k"), 0, False, 10, 17) == (0, False)
+assert S(o("g"), 7, False, 10, 17) == (0, False)
+assert S(o("G"), 0, False, 10, 17) == (10, True)
+assert S(o(" "), 3, False, 10, 17) == (10, True)
+assert S(o("b"), 12, False, 20, 17) == (0, False)
+assert S(o("j"), 0, False, 0, 17) == (0, True)
+PY
 echo PASS
