@@ -7,6 +7,8 @@ skills:
   - tdd-red-green
   - root-cause-first
   - receiving-findings
+  - react-vite-perf
+  - ui-guidelines
 ---
 
 ## Code navigation

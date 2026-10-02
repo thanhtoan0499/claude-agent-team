@@ -13,6 +13,8 @@ and no way to ask the user), human-partner steps replaced by `NEEDS_DECISION`, t
 | `test-quality` | obra/superpowers `test-driven-development/writing-good-tests` | MIT |
 | `review-method` | obra/superpowers `requesting-code-review/code-reviewer` | MIT |
 | `stack-checks` | awesome-skills/code-review-skill (security, SQL-injection, FastAPI, React references) | MIT |
+| `react-vite-perf` | vercel-labs/agent-skills `react-best-practices` (licence stated in the skill's frontmatter; the repo has no LICENSE file; rules paraphrased, no code copied) | MIT |
+| `ui-guidelines` | vercel-labs/web-interface-guidelines (`command.md` rules) | MIT |
 | `test-gap-analysis` | anthropics/claude-plugins-official `pr-review-toolkit/pr-test-analyzer` | Apache-2.0 |
 | `silent-failure-and-boundaries` | anthropics/claude-plugins-official `pr-review-toolkit/silent-failure-hunter` | Apache-2.0 |
 | `ui-recon-and-a11y-verify` | anthropics/skills `webapp-testing` | Apache-2.0 |
@@ -20,6 +22,7 @@ and no way to ask the user), human-partner steps replaced by `NEEDS_DECISION`, t
 ## MIT
 Copyright (c) 2025 Jesse Vincent (obra/superpowers)
 Copyright (c) 2025 awesome-skills (awesome-skills/code-review-skill)
+Copyright (c) 2025 Vercel Labs (vercel-labs/web-interface-guidelines; vercel-labs/agent-skills react-best-practices)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
