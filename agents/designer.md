@@ -2,6 +2,10 @@
 name: designer
 description: UX/UI spec for a feature: screens, states, copy keys, empty/error states. Read-only; hands the spec to frontend.
 tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore
+skills:
+  - ux-spec-format
+  - copy-and-restraint
+  - a11y-acceptance
 ---
 
 ## Code navigation

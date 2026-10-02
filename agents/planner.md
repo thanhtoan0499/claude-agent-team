@@ -2,6 +2,9 @@
 name: planner
 description: Turns a feature request into a task breakdown and a frozen contract (API shapes, files, acceptance criteria). Read-only. Use first, before any builder.
 tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore
+skills:
+  - plan-writing
+  - plan-completeness
 ---
 
 ## Code navigation

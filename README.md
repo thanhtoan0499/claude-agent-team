@@ -47,6 +47,16 @@ the latest. If `az` is missing or not logged in, the master's entry is the only 
 Agents get role discipline from small skills preloaded through the agent's `skills:` frontmatter (full text injected at start, so each is
 kept short: <= 100 lines per skill, <= 340 per agent; `bash tests/test_skills.sh` enforces it). Repo-specific knowledge is NOT copied in:
 the master points agents at the repo's own files (CLAUDE.md, `.claude/rules/`, `.claude/agents/<role>.md`) in the brief.
+| agent | preloaded skills |
+|---|---|
+| planner | `plan-writing`, `plan-completeness` |
+| designer | `ux-spec-format`, `copy-and-restraint`, `a11y-acceptance` |
+| backend | `evidence-before-claims`, `tdd-red-green`, `root-cause-first`, `receiving-findings` |
+| frontend | the backend four + `react-vite-perf`, `ui-guidelines` |
+| qa | `evidence-before-claims`, `tdd-red-green`, `root-cause-first`, `test-quality`, `test-gap-analysis`, `ui-recon-and-a11y-verify` |
+| reviewer | `evidence-before-claims`, `review-method`, `silent-failure-and-boundaries`, `stack-checks` |
+
+Reviewer/qa severity is two levels only: `blocker` (fails the verdict) and `major`; style remarks are dropped.
 Adapted third-party material and licences: `THIRD_PARTY.md`. A wrong skill name in `skills:` is skipped silently by Claude Code, so after
 changing wiring run `bash tests/smoke_preload.sh` (manual, costs a few cents) to see which skills the agent really received.
 

@@ -13,6 +13,9 @@ and no way to ask the user), human-partner steps replaced by `NEEDS_DECISION`, t
 | `test-quality` | obra/superpowers `test-driven-development/writing-good-tests` | MIT |
 | `review-method` | obra/superpowers `requesting-code-review/code-reviewer` | MIT |
 | `stack-checks` | awesome-skills/code-review-skill (security, SQL-injection, FastAPI, React references) | MIT |
+| `plan-writing` | obra/superpowers `writing-plans` | MIT |
+| `ux-spec-format`, `a11y-acceptance` | aditya-ariosity/ux-ui-skills `handoff-to-dev` and its accessibility reference | MIT |
+| `copy-and-restraint` | anthropics/skills `frontend-design` | Apache-2.0 |
 | `react-vite-perf` | vercel-labs/agent-skills `react-best-practices` (licence stated in the skill's frontmatter; the repo has no LICENSE file; rules paraphrased, no code copied) | MIT |
 | `ui-guidelines` | vercel-labs/web-interface-guidelines (`command.md` rules) | MIT |
 | `test-gap-analysis` | anthropics/claude-plugins-official `pr-review-toolkit/pr-test-analyzer` | Apache-2.0 |
@@ -22,6 +25,7 @@ and no way to ask the user), human-partner steps replaced by `NEEDS_DECISION`, t
 ## MIT
 Copyright (c) 2025 Jesse Vincent (obra/superpowers)
 Copyright (c) 2025 awesome-skills (awesome-skills/code-review-skill)
+Copyright (c) 2026 Aditya Sharma (aditya-ariosity/ux-ui-skills)
 Copyright (c) 2025 Vercel Labs (vercel-labs/web-interface-guidelines; vercel-labs/agent-skills react-best-practices)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -43,5 +47,5 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ## Apache-2.0
-Works by Anthropic (pr-review-toolkit, webapp-testing). The licence text is in `licenses/Apache-2.0.txt`; no NOTICE file is shipped with
+Works by Anthropic (pr-review-toolkit, webapp-testing, frontend-design). The licence text is in `licenses/Apache-2.0.txt`; no NOTICE file is shipped with
 these works. The adapted skills are modified versions, as stated above.
