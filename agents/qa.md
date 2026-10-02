@@ -6,6 +6,9 @@ skills:
   - evidence-before-claims
   - tdd-red-green
   - root-cause-first
+  - test-quality
+  - test-gap-analysis
+  - ui-recon-and-a11y-verify
 ---
 
 ## Code navigation

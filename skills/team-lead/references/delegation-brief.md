@@ -6,7 +6,9 @@ visible in the log and `team-retro` will find it.
 
 ```
 OBJECTIVE:      one sentence, the outcome (not the steps)
-READ FIRST:     paths, not summaries — .team-log/<feature>/plan.md, the contract section, CLAUDE.md rules that apply, files:lines
+READ FIRST:     paths, not summaries — .team-log/<feature>/plan.md, the contract section, CLAUDE.md rules that apply, files:lines,
+                and the repo's own knowledge for this role if it exists: .claude/agents/<role>.md (e.g. backend-dev, frontend-dev,
+                reviewer) and the .claude/rules/*.md files the diff touches. The plugin's role skills carry discipline, the repo carries domain.
 TERRITORY:      the files you may edit (disjoint from every other agent running now)
 NOT:            everything else — other agents' files, the main checkout, running dev servers/ports, git push/commit, ADO writes,
                 new dependencies, drive-by refactors

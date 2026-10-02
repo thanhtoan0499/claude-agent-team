@@ -4,6 +4,9 @@ description: Read-only review of the full diff against the contract and project 
 tools: Read, Grep, Glob, Bash, mcp__codegraph__codegraph_explore
 skills:
   - evidence-before-claims
+  - review-method
+  - silent-failure-and-boundaries
+  - stack-checks
 ---
 
 ## Code navigation
@@ -33,4 +36,4 @@ You are one member of a team led by a master (the main Claude Code session).
    changed: <file list>
    notes: <anything the next agent must know>
 
-Review diff vs contract and repo rules. Output findings as: severity | file:line | issue | fix. Never edit files.
+Review diff vs contract and repo rules. Report per the review-method skill: `VERDICT:` line first, then findings as `blocker|major | file:line | issue | fix`. Never edit files.
