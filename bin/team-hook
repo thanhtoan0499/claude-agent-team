@@ -99,6 +99,13 @@ team_agent_event() {
         [ "$tries" -le 0 ] && break
         tries=$((tries - 1)); sleep 0.4              # transcript is written asynchronously: wait for the flush
       done
+      # SubagentStop fires again when the hand-back is delivered to the master: same agent, same report -> log it once.
+      if [ -n "$id" ] && [ -n "$msg" ]; then
+        local lf sig; lf=$( cd "$cwd" && team_log_file ); lf="$(dirname "$lf")/.last_report_$id"
+        sig=$(printf '%s' "$msg" | cksum | cut -d' ' -f1)
+        [ "$(cat "$lf" 2>/dev/null)" = "$sig" ] && return 0
+        echo "$sig" > "$lf" 2>/dev/null || true
+      fi
       if [ "$agent" = agent-team:planner ] && [ -n "$msg" ]; then save_plan "$msg"; fi
       if grep -qE '^[[:space:]]*NEEDS_DECISION[[:space:]]*:?[[:space:]]*$' <<<"$msg"; then
         log question --from "$agent" --agent-id "$id" --body "${msg:0:$MAX}" ${tp:+--ref "$tp"}
@@ -158,7 +165,11 @@ master_event() {
   local tool to desc body q
   [ -z "$id" ] || return 0                           # subagent calls are handled above; this is the main thread
   if [ "$ev" = UserPromptSubmit ]; then
-    body=$(J '.prompt // .user_prompt // empty'); [ -z "$body" ] || auto_start_feature "$body"
+    body=$(J '.prompt // .user_prompt // empty')
+    # Messages the harness injects into the user's turn (subagent hand-backs, task notifications) are not the user's words, and their
+    # content is already logged as worker_done: never record them as user_reply, never count them for the card cadence.
+    case "$body" in "<agent-message"*|"<task-notification"*|"<system-reminder"*|"[Subagent hand-back]"*) return 0;; esac
+    [ -z "$body" ] || auto_start_feature "$body"
   fi
   feature_active || return 0
   if [ "$ev" = SessionStart ]; then

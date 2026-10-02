@@ -229,6 +229,20 @@ echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:planner","agent
 grep -q "T2 redo" .team-log/p7/plan.md && ! grep -q "T1 do x" .team-log/p7/plan.md || { echo "FAIL: plan.md not replaced"; exit 1; }
 echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:backend","agent_id":"b9","cwd":"'"$T"'","last_assistant_message":"DONE not a plan"}' | "$B/team-hook"
 ! grep -q "not a plan" .team-log/p7/plan.md || { echo "FAIL: non-planner overwrote plan.md"; exit 1; }
+# hook: a repeated SubagentStop (same agent, same report) is logged once; a different report from the same agent is logged
+"$B/team-log" feature_start --feature dup --body x; fd=.team-log/dup/events.ndjson
+SS1='{"hook_event_name":"SubagentStop","agent_type":"agent-team:qa","agent_id":"d1","cwd":"'"$T"'","last_assistant_message":"VERDICT: PASS"}'
+echo "$SS1" | "$B/team-hook"; echo "$SS1" | "$B/team-hook"
+echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:qa","agent_id":"d1","cwd":"'"$T"'","last_assistant_message":"VERDICT: FAIL"}' | "$B/team-hook"
+echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:qa","agent_id":"d2","cwd":"'"$T"'","last_assistant_message":"VERDICT: PASS"}' | "$B/team-hook"
+[ "$(jq -s '[.[]|select(.type=="worker_done")]|length' $fd)" = 3 ] || { echo "FAIL: duplicate SubagentStop logged twice / distinct reports dropped"; jq -c '[.type,.agent_id,.body]' $fd; exit 1; }
+# hook: harness-injected hand-back / notification text is NOT a user_reply; a real prompt still is, and the injected one does not advance the card cadence
+n=$(jq -s '[.[]|select(.type=="user_reply")]|length' $fd)
+M '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'","prompt":"<agent-message from=\"x\">\n[Subagent hand-back] report"}'
+M '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'","prompt":"<task-notification><task-id>t</task-id></task-notification>"}'
+[ "$(jq -s '[.[]|select(.type=="user_reply")]|length' $fd)" = "$n" ] || { echo "FAIL: injected message logged as user_reply"; exit 1; }
+M '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'","prompt":"a real user prompt"}'
+[ "$(jq -s '[.[]|select(.type=="user_reply")]|length' $fd)" = "$((n + 1))" ] || { echo "FAIL: real prompt not logged"; exit 1; }
 # regression: `team-gate ... | head -1` (closing the pipe early) must still write the gate event, every time
 rm -rf .team-log/pipe; "$B/team-log" feature_start --feature pipe --body x
 for i in $(seq 40); do "$B/team-gate" --topic "pipe $i" --in-ticket y --reversible y --external n --security n --needs-human n | head -1 >/dev/null || true; done
