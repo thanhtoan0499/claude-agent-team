@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# SubagentStart/SubagentStop hook: logs agent lifecycle and turns NEEDS_DECISION into a question event.
+# Never blocks the agent: always exits 0.
+trap 'exit 0' ERR
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "$DIR/_lib.sh"
+in=$(cat)
+ev=$(jq -r '.hook_event_name // empty' <<<"$in")
+agent=$(jq -r '.agent_type // "unknown"' <<<"$in")
+id=$(jq -r '.agent_id // empty' <<<"$in")
+cwd=$(jq -r '.cwd // empty' <<<"$in"); [ -n "$cwd" ] || cwd=$PWD
+msg=$(jq -r '.last_assistant_message // empty' <<<"$in")
+log() { ( cd "$cwd" && "$DIR/team-log" "$@" ) 2>/dev/null || true; }
+case "$ev" in
+  SubagentStart) log agent_started --from "$agent" --body "id=$id" ;;
+  SubagentStop)
+    if grep -q 'NEEDS_DECISION' <<<"$msg"; then
+      log question --from "$agent" --body "${msg:0:2000}"
+    else
+      log worker_done --from "$agent" --body "${msg:0:800}"
+    fi ;;
+esac
+exit 0

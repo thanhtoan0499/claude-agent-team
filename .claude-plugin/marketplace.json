@@ -1,0 +1,14 @@
+{
+  "name": "agent-team-marketplace",
+  "description": "Marketplace for the agent-team plugin",
+  "owner": { "name": "thanhtoan0499" },
+  "plugins": [
+    {
+      "name": "agent-team",
+      "description": "Master-led AI dev team with a structured question/decision log.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": { "name": "thanhtoan0499" }
+    }
+  ]
+}

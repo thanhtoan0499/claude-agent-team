@@ -1,0 +1,11 @@
+{
+  "description": "Log subagent lifecycle and NEEDS_DECISION questions to the feature's events.ndjson",
+  "hooks": {
+    "SubagentStart": [
+      { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+    ]
+  }
+}
