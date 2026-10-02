@@ -40,6 +40,7 @@ assert S(o(" "), 3, False, 10, 17) == (10, True)
 assert S(o("b"), 12, False, 20, 17) == (0, False)
 assert S(o("j"), 0, False, 0, 17) == (0, True)
 PY
+python3 "$B/../tests/test_tui.py" >/dev/null || { python3 "$B/../tests/test_tui.py"; exit 1; }  # keys, lazy bodies, cache, incremental sync
 # ---- v0.1.4: full reports, handback transcript, tool_call/error, master/user events ----
 export TEAM_HOOK_RETRIES=0
 "$B/team-log" feature_start --body "v4" --feature v4

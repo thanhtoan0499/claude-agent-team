@@ -82,7 +82,7 @@ bin/team-report [feature]     # timeline: who asked what, what master decided an
 /agent-team:team-retro        # find repeated questions / reversed decisions → improve agent prompts
 bash tests/test_log.sh        # self-check
 ```
-`team-tui` keys: j/k move (list) or scroll (inside a ticket) · space/b page · g/G top/end · n/p next/prev ticket · c copy timeline (wl-copy, xclip, else OSC52) · f Q&A-only · enter open · esc back · q quit.
+`team-tui` keys: j/k move (list) or scroll (inside a ticket) · g/G (or Home/End) first/last ticket, top/end of a log · space/b page · o expand the collapsed body on screen, O expand all · n/p next/prev ticket · c copy the full timeline (wl-copy, xclip, else OSC52) · f Q&A-only · enter open · esc back · q quit. The footer shows `from-to/total TOP|END`. Bodies longer than 20 lines are collapsed to a preview (`… +N more lines`), so a long planner report no longer costs a re-wrap on every key; `--dump` and `c` always give the whole text.
 NDJSON is the source of truth; `.team-log/team.db` (SQLite) is a derived index rebuilt incrementally, safe to delete.
 
 `team-log` refuses a `decision` without `--rationale`, a `question` without `--from`, a `task_assigned` without `--to`/`--body`.

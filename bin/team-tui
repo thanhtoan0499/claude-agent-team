@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """lazygit-style browser for the team log. Left: features/tickets. Enter: timeline of that feature.
 NDJSON stays the source of truth; <log dir>/team.db (SQLite) is a derived index synced on every refresh.
-usage: team-tui            interactive (j/k move, enter open, f Q&A-only, G follow end, esc back, q quit)
-       team-tui --dump [feature]   plain text, no curses (scripts/tests)"""
-import curses, glob, json, os, re, sqlite3, subprocess, sys, textwrap
+usage: team-tui            interactive (j/k move, g/G first/last, enter open, o expand, f Q&A-only, esc back, q quit)
+       team-tui --dump [feature]   plain text, no curses (scripts/tests)
+Cost model: a keypress never rebuilds the timeline. Lines are built once per (ticket, width, filter), extended only by
+events appended since, and a body longer than BODY_PREVIEW lines is wrapped lazily: only its head, until you press o."""
+import os
+os.environ.setdefault("ESCDELAY", "25")  # curses waits this long after Esc for an escape sequence (default 1000 ms = a laggy 'back')
+import curses, glob, json, re, sqlite3, subprocess, sys, textwrap
 from datetime import datetime, timezone
 
 def log_dir():
@@ -26,21 +30,49 @@ def open_db(d):
         primary key(feature, line))""")
     return con
 
-def sync(con, d):  # append-only logs: ingest only lines beyond what the DB already has
+_seen = {}  # log path -> (lines consumed, byte offset): where this process stopped reading each append-only log
+
+def _skip(f, n):
+    """-> (lines, offset) after the first n complete lines of f; fewer lines than n means the log is not the one the DB indexed."""
+    c = off = 0
+    with open(f, "rb") as fh:
+        for raw in fh:
+            if c == n or not raw.endswith(b"\n"): break
+            c += 1; off += len(raw)
+    return c, off
+
+def sync(con, d):
+    """Ingest events appended since the last call, reading only the new bytes (a keypress must not re-read the whole log).
+    -> number of new events."""
+    new = 0
     for f in glob.glob(os.path.join(d, "*", "events.ndjson")):
-        feat = os.path.basename(os.path.dirname(f))
-        done = con.execute("select coalesce(max(line),0) from events where feature=?", (feat,)).fetchone()[0]
-        with open(f, encoding="utf-8") as fh:
-            for n, raw in enumerate(fh, 1):
-                if n <= done: continue
+        feat = os.path.basename(os.path.dirname(f)); size = os.path.getsize(f)
+        if f not in _seen:  # first look in this process: resume after what the DB already holds
+            done = con.execute("select coalesce(max(line),0) from events where feature=?", (feat,)).fetchone()[0]
+            c, off = _skip(f, done)
+            if c < done: con.execute("delete from events where feature=?", (feat,)); c = off = 0  # log replaced: reindex
+            _seen[f] = (c, off)
+        n, off = _seen[f]
+        if size < off: con.execute("delete from events where feature=?", (feat,)); n = off = 0  # log truncated: reindex
+        if size == off: _seen[f] = (n, off); continue
+        with open(f, "rb") as fh:
+            fh.seek(off)
+            for raw in fh:
+                whole = raw.endswith(b"\n")
                 try: e = json.loads(raw)
-                except ValueError: continue  # torn/garbled line: skip, keep numbering
-                con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (feat, n, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
+                except ValueError:
+                    if not whole: break  # half-written tail: pick it up once the writer finishes it
+                    n += 1; off += len(raw); continue  # garbled line: skip, keep numbering
+                new += con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (feat, n + 1, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
                      e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id"),
                      e.get("ticket"), e.get("ticket_type"), e.get("title"),
-                     e.get("decided_by"), e.get("verdict"), e.get("codes")))
+                     e.get("decided_by"), e.get("verdict"), e.get("codes"))).rowcount
+                if not whole: break  # complete JSON but no newline yet: keep it, re-read (and ignore the duplicate) later
+                n += 1; off += len(raw)
+        _seen[f] = (n, off)
     con.commit()
+    return new
 
 def features(con):
     return con.execute("""select feature, min(ts) first, max(ts) last, count(*) n,
@@ -64,35 +96,64 @@ COLOR = {"question": 3, "decision": 2, "review_finding": 1, "task_assigned": 6, 
          "escalation": 3, "user_reply": 5, "error": 1, "gate": 3}
 QA = {"question", "decision", "review_finding", "escalation", "user_reply", "error", "gate"}
 
-def timeline(con, feat, width, qa_only=False):
-    """-> [(text, color)] ; durations pair agent_started/stop by agent_id."""
-    rows = con.execute("select * from events where feature=? order by line", (feat,)).fetchall()
-    if not rows: return []
-    t0 = ts(rows[0]["ts"]); starts = {}; out = []; w = max(width - 6, 20)
-    for r in rows:
-        t = ts(r["ts"]); dur = ""
-        aid = r["agent_id"]
-        if r["type"] == "agent_started" and aid: starts[aid] = t
-        elif aid and aid in starts and r["type"] in ("worker_done", "question"):
-            dur = f" ({mmss((t - starts[aid]).total_seconds())})"
-        if qa_only and r["type"] not in QA: continue
+BODY_PREVIEW = 20  # wrapped lines of one body shown before it collapses to "… +N more lines" (o expands, O expands all)
+
+def wrap_body(body, w, limit=None):
+    """Wrapped lines of a body, stopping once `limit` lines are out (None = all): text past the limit is never wrapped.
+    -> (lines, source lines left unshown)"""
+    paras = (body or "").splitlines() or [""]; out = []
+    for i, para in enumerate(paras):
+        if limit is not None and len(out) >= limit: return out, len(paras) - i
+        cap = None if limit is None else (limit - len(out)) * w * 2
+        cut = cap is not None and len(para) > cap  # one enormous line (a JSON blob): wrap only its head
+        out += textwrap.wrap(para[:cap] if cut else para, w) or ([""] if body else [])
+        if cut: return out[:limit], len(paras) - i
+    return out, 0
+
+class Timeline:
+    """[(text, color)] for ONE feature at one width/filter, built incrementally: update() folds in only the events appended
+    since the last call, so scrolling never re-wraps anything. Durations pair agent_started/stop by agent_id.
+    marks = [(index into lines, event line)] of the collapsed bodies; `expanded` = event lines shown in full."""
+    def __init__(s, feat, width, qa_only=False, expanded=(), everything=False):
+        s.feat, s.w, s.qa = feat, max(width - 6, 20), qa_only
+        s.expanded, s.everything = frozenset(expanded), everything
+        s.last = 0; s.t0 = None; s.starts = {}; s.lines = []; s.marks = []
+
+    def update(s, con):
+        rows = con.execute("select * from events where feature=? and line>? order by line", (s.feat, s.last)).fetchall()
+        for r in rows: s._add(r)
+        if rows: s.last = rows[-1]["line"]
+        return s.lines
+
+    def _add(s, r):
+        out = s.lines; w = s.w; t = ts(r["ts"]); dur = ""; aid = r["agent_id"]
+        if s.t0 is None: s.t0 = t
+        if r["type"] == "agent_started" and aid: s.starts[aid] = t
+        elif aid and aid in s.starts and r["type"] in ("worker_done", "question"):
+            dur = f" ({mmss((t - s.starts[aid]).total_seconds())})"
+        if s.qa and r["type"] not in QA: return
         who = r["frm"] or ""
         if r["type"] == "tool_call":  # one compact line each; hidden by the Q&A filter
-            out.append((f"+{mmss((t - t0).total_seconds())} · {who}: {(r['body'] or '')[:w]}", 0)); continue
+            out.append((f"+{mmss((t - s.t0).total_seconds())} · {who}: {(r['body'] or '')[:w]}", 0)); return
         if r["dst"]: who = f"{who}→{r['dst']}" if who else f"→{r['dst']}"
-        head = f"+{mmss((t - t0).total_seconds())} {ICON.get(r['type'], '·')} {r['type']} {who}" + \
+        head = f"+{mmss((t - s.t0).total_seconds())} {ICON.get(r['type'], '·')} {r['type']} {who}" + \
                (f" [{r['task']}]" if r["task"] else "") + dur + \
                (f" [by {r['decided_by']}]" if r["decided_by"] else "") + \
                (f" {r['verdict']}" + (f" ({r['codes']})" if r["codes"] else "") if r["verdict"] else "")
-        c = COLOR.get(r["type"], 0)
-        out.append((head, c))
-        if r["type"] == "agent_started": continue
-        for para in (r["body"] or "").splitlines() or [""]:
-            for ln in textwrap.wrap(para, w) or ([""] if r["body"] else []): out.append(("    " + ln, 0))
+        out.append((head, COLOR.get(r["type"], 0)))
+        if r["type"] == "agent_started": return
+        full = s.everything or r["line"] in s.expanded
+        body, hidden = wrap_body(r["body"], w, None if full else BODY_PREVIEW)
+        out.extend(("    " + ln, 0) for ln in body)
+        if hidden:
+            s.marks.append((len(out), r["line"])); out.append((f"    … +{hidden} more lines  (o: expand)", 4))
         if r["options"]: out.append(("    options: " + r["options"], 0))
         if r["rationale"]:
             for i, ln in enumerate(textwrap.wrap(r["rationale"], w - 5)): out.append(("    " + ("WHY: " if not i else "     ") + ln, 2))
-    return out
+
+def timeline(con, feat, width, qa_only=False, full=True):
+    """-> [(text, color)]. One-shot (dump, copy): every body in full unless full=False."""
+    return Timeline(feat, width, qa_only, everything=full).update(con)
 
 def local(s): return ts(s).astimezone().strftime("%m-%d %H:%M")
 
@@ -120,7 +181,7 @@ def dump(con, feat):
     if feat: print("\n".join(t for t, _ in timeline(con, feat, 100))); return
     for f in features(con): print(feature_line(f, 110))
 
-SCROLL_KEYS = {ord(c) for c in "jkbgG "} | {curses.KEY_DOWN, curses.KEY_UP, curses.KEY_NPAGE, curses.KEY_PPAGE}
+SCROLL_KEYS = {ord(c) for c in "jkbgG "} | {curses.KEY_DOWN, curses.KEY_UP, curses.KEY_NPAGE, curses.KEY_PPAGE, curses.KEY_HOME, curses.KEY_END}
 
 def scroll(k, top, follow, maxtop, page):
     """In-ticket scrolling. -> (top, follow). follow = pinned to newest line."""
@@ -128,8 +189,8 @@ def scroll(k, top, follow, maxtop, page):
     elif k in (ord("k"), curses.KEY_UP): top -= 1
     elif k in (curses.KEY_NPAGE, ord(" ")): top += page
     elif k in (curses.KEY_PPAGE, ord("b")): top -= page
-    elif k == ord("g"): top = 0
-    elif k == ord("G"): top = maxtop
+    elif k in (ord("g"), curses.KEY_HOME): top = 0
+    elif k in (ord("G"), curses.KEY_END): top = maxtop
     else: return top, follow
     top = max(0, min(top, maxtop))
     return top, top >= maxtop
@@ -147,44 +208,73 @@ def copy_clip(text):
     sys.stdout.write("\033]52;c;" + base64.b64encode(text.encode()).decode() + "\a"); sys.stdout.flush()
     return "OSC52"
 
+def pos_label(top, view, total):
+    """Lines on screen out of all of them, 'TOP'/'END' at the edges: '1-22/200 TOP', '179-200/200 END'."""
+    if total <= view: return f"all {total}"
+    return f"{top + 1}-{min(top + view, total)}/{total}" + (" TOP" if top == 0 else " END" if top + view >= total else "")
+
+KEYS_LIST = " j/k move  g/G first/last  enter open  c copy  q quit "
+KEYS_TICKET = " j/k scroll  space/b page  g/G top/end  o/O expand  n/p ticket  c copy  f Q&A  esc back  q quit "
+
 def ui(scr, con, d):
     curses.curs_set(0); curses.use_default_colors()
     for i in range(1, 7): curses.init_pair(i, i, -1)
     curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
     scr.timeout(2000)
-    feat = None; sel = 0; top = 0; qa = False; follow = True; lw = 0; msg = ""; maxtop = 0
+    feat = None; sel = ltop = top = maxtop = view = 0; qa = False; follow = True; msg = ""
+    opened = {}      # feature -> event lines the user expanded with o
+    everything = set()  # features shown with every body expanded (O)
+    tl = tlkey = None
+    fs = features(con); dirty = True
     while True:
-        sync(con, d); fs = features(con); h, w = scr.getmaxyx(); scr.erase()
-        if not fs: scr.addstr(0, 0, f"no events in {d}   (q quit)"); k = scr.getch()
-        else:
-            sel = max(0, min(sel, len(fs) - 1)); lw = min(max(48, w // 3), w - 20) if feat else w
-            scr.addstr(0, 0, " Tickets / features ".ljust(lw)[:lw], curses.color_pair(7))
-            for i, f in enumerate(fs[: h - 2]):
-                attr = curses.A_REVERSE if i == sel else (curses.color_pair(2) if status(f) == "running" else 0)
-                scr.addstr(i + 1, 0, feature_line(f, lw).ljust(lw)[: lw - 1], attr)
-            if feat:
-                cur = fs[sel]["feature"]; body_w = w - lw - 2
-                lines = timeline(con, cur, body_w, qa)
-                view = h - 2; maxtop = max(0, len(lines) - view)
-                top = maxtop if follow else max(0, min(top, maxtop))
-                scr.addstr(0, lw + 1, f" {ticket_label(fs[sel])}{'  [Q&A only]' if qa else ''} ".ljust(body_w)[:body_w], curses.color_pair(7))
-                for i, (t, c) in enumerate(lines[top: top + view]):
-                    scr.addstr(i + 1, lw + 1, t[:body_w], curses.color_pair(c) if c else 0)
+        if sync(con, d): fs = features(con); dirty = True
+        if dirty:  # redraw only when a key, a resize or a new event changed something; an idle tick costs one stat per log
+            dirty = False; h, w = scr.getmaxyx(); scr.erase()
+            if not fs: scr.addstr(0, 0, f"no events in {d}   (q quit)")
             else:
-                f = fs[sel]
-                scr.addstr(h - 2, 0, (f["request"] or "").replace("\n", " ")[: w - 1], curses.A_DIM)
-            keys = (" j/k scroll  space/b page  g/G top/end  n/p ticket  c copy  f Q&A  esc back  q quit "
-                    if feat else " j/k move  enter open  c copy  q quit ")
-            scr.addstr(h - 1, 0, (keys + (f"| {top + 1}/{len(lines)} " if feat else "") + (f"| {msg}" if msg else ""))[: w - 1], curses.A_DIM)
-            k = scr.getch()
-        if k in (ord("q"),) or (k == 27 and not feat): return
+                sel = max(0, min(sel, len(fs) - 1)); lw = min(max(48, w // 3), w - 20) if feat else w
+                rows = h - 2 if feat else h - 3  # list view keeps its last row for the ticket's request text
+                if sel < ltop: ltop = sel  # keep the selected ticket on screen
+                elif sel >= ltop + rows: ltop = sel - rows + 1
+                ltop = max(0, min(ltop, len(fs) - rows))
+                scr.addstr(0, 0, " Tickets / features ".ljust(lw)[:lw], curses.color_pair(7))
+                for i, f in enumerate(fs[ltop: ltop + rows]):
+                    attr = curses.A_REVERSE if ltop + i == sel else (curses.color_pair(2) if status(f) == "running" else 0)
+                    scr.addstr(i + 1, 0, feature_line(f, lw).ljust(lw)[: lw - 1], attr)
+                if feat:
+                    cur = fs[sel]["feature"]; body_w = w - lw - 2
+                    key = (cur, body_w, qa, frozenset(opened.get(cur, ())), cur in everything)
+                    if key != tlkey: tl = Timeline(cur, body_w, qa, key[3], key[4]); tlkey = key
+                    lines = tl.update(con)
+                    view = h - 2; maxtop = max(0, len(lines) - view)
+                    top = maxtop if follow else max(0, min(top, maxtop))
+                    scr.addstr(0, lw + 1, f" {ticket_label(fs[sel])}{'  [Q&A only]' if qa else ''} ".ljust(body_w)[:body_w], curses.color_pair(7))
+                    for i, (t, c) in enumerate(lines[top: top + view]):
+                        scr.addstr(i + 1, lw + 1, t[:body_w], curses.color_pair(c) if c else 0)
+                    status_line = f" {pos_label(top, view, len(lines))} |" + (f" {msg} |" if msg else "") + KEYS_TICKET
+                else:
+                    scr.addstr(h - 2, 0, (fs[sel]["request"] or "").replace("\n", " ")[: w - 1], curses.A_DIM)
+                    status_line = (f" {msg} |" if msg else "") + KEYS_LIST
+                scr.addstr(h - 1, 0, status_line[: w - 1], curses.A_DIM)  # position and message first: a narrow terminal cuts the key list, not them
+        k = scr.getch()
+        if k == -1: continue  # idle tick: only the sync above
+        dirty = True
+        if k == ord("q") or (k == 27 and not feat): return
         msg = ""
         if k == 27 and feat: feat = None
         elif k == ord("c") and fs:
-            txt = "\n".join(t for t, _ in timeline(con, fs[sel]["feature"], 10**6, qa if feat else False))
+            txt = "\n".join(t for t, _ in timeline(con, fs[sel]["feature"], 10**6, qa if feat else False))  # always the full text
             msg = f"copied {txt.count(chr(10)) + 1} lines via {copy_clip(txt)}"
-        elif feat and k in SCROLL_KEYS: top, follow = scroll(k, follow and maxtop or top, follow, maxtop, h - 3)
+        elif feat and k in SCROLL_KEYS: top, follow = scroll(k, top, follow, maxtop, max(1, view - 1))
+        elif feat and k == ord("o"):  # expand the first collapsed body that is on screen
+            hit = next((ev for idx, ev in tl.marks if top <= idx < top + view), None) if tl else None
+            if hit: opened.setdefault(fs[sel]["feature"], set()).add(hit); follow = False
+            else: msg = "nothing collapsed on screen"
+        elif feat and k == ord("O"): everything ^= {fs[sel]["feature"]}; follow = False
         elif feat and k in (ord("n"), ord("p")): sel += 1 if k == ord("n") else -1; top = 0; follow = True
+        elif feat and k in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT, ord("l")): pass  # already open: do not jump to the end
+        elif k in (ord("g"), curses.KEY_HOME): sel = 0
+        elif k in (ord("G"), curses.KEY_END): sel = len(fs) - 1
         elif k in (ord("j"), curses.KEY_DOWN): sel += 1
         elif k in (ord("k"), curses.KEY_UP): sel -= 1
         elif k in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT, ord("l")): feat = True; follow = True
