@@ -229,6 +229,10 @@ echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:planner","agent
 grep -q "T2 redo" .team-log/p7/plan.md && ! grep -q "T1 do x" .team-log/p7/plan.md || { echo "FAIL: plan.md not replaced"; exit 1; }
 echo '{"hook_event_name":"SubagentStop","agent_type":"agent-team:backend","agent_id":"b9","cwd":"'"$T"'","last_assistant_message":"DONE not a plan"}' | "$B/team-hook"
 ! grep -q "not a plan" .team-log/p7/plan.md || { echo "FAIL: non-planner overwrote plan.md"; exit 1; }
+# regression: `team-gate ... | head -1` (closing the pipe early) must still write the gate event, every time
+rm -rf .team-log/pipe; "$B/team-log" feature_start --feature pipe --body x
+for i in $(seq 40); do "$B/team-gate" --topic "pipe $i" --in-ticket y --reversible y --external n --security n --needs-human n | head -1 >/dev/null || true; done
+n=$(jq -s '[.[]|select(.type=="gate")]|length' .team-log/pipe/events.ndjson); [ "$n" = 40 ] || { echo "FAIL: $n/40 gate events survive a closed pipe"; exit 1; }
 # scenario replay (bug 8991, the 4 open questions that used to stall the run): only the plan approval should reach the user
 rm -rf .team-log/s8991; "$B/team-log" feature_start --feature s8991 --body "replay"
 S() { "$B/team-gate" --to planner --task plan "$@" | head -1 || true; }   # rc 1 (ESCALATE) must not kill the test under pipefail
@@ -238,6 +242,6 @@ c=$(S --topic "workspace: worktree fix/8991-*" --in-ticket y --reversible y --ex
 d=$(S --topic "BA copy for the Activate disclaimer" --in-ticket y --reversible y --external n --security n --needs-human y --placeholder y)
 e=$(S --topic "also push realtime to every viewer (scope C)" --in-ticket n --reversible y --external n --security n --needs-human n)
 [ "$a|$b|$c|$d|$e" = "DECIDE|DECIDE|DECIDE|ASSUME ASSUMED_PLACEHOLDER|ESCALATE OUT_OF_SCOPE" ] || { echo "FAIL: 8991 replay: $a|$b|$c|$d|$e"; exit 1; }
-jq -s -e '[.[]|select(.type=="gate")]|length==5 and ([.[]|select(.verdict=="ESCALATE")]|length)==1' .team-log/s8991/events.ndjson >/dev/null || { echo "FAIL: 8991 replay log"; exit 1; }
+jq -s -e '[.[]|select(.type=="gate")]|length==5 and ([.[]|select(.verdict=="ESCALATE")]|length)==1' .team-log/s8991/events.ndjson >/dev/null || { echo "FAIL: 8991 replay log"; echo "CURRENT=$(cat .team-log/CURRENT 2>/dev/null)"; ls .team-log; echo "-- where did 'remove snapshot' go:"; grep -rl "remove snapshot" .team-log | head; jq -c '[.feature,.type,.verdict,.body]' .team-log/s8991/events.ndjson 2>&1 | head -12; exit 1; }
 unset TEAM_HOOK_RETRIES
 echo PASS

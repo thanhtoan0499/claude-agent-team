@@ -55,13 +55,16 @@ join() { local IFS=,; echo "$*"; }
 if [ ${#esc[@]} -gt 0 ]; then verdict=ESCALATE; codes=$(join "${esc[@]}" ${asm[@]+"${asm[@]}"}); rc=1
 elif [ ${#asm[@]} -gt 0 ]; then verdict=ASSUME; codes=$(join "${asm[@]}"); rc=0
 else verdict=DECIDE; codes=; rc=0; fi
-echo "$verdict${codes:+ $codes}"
+# Log BEFORE printing, and ignore SIGPIPE: a caller doing `team-gate ... | head -1` closes the pipe after line 1, and an
+# early print would kill this script before the `gate` event was written (measured: ~1 in 5 events lost under load).
+trap '' PIPE
+if [ -z "$nolog" ]; then
+  "$DIR/team-log" gate --from master ${to:+--to "$to"} ${task:+--task "$task"} --body "$topic" --verdict "$verdict" ${codes:+--codes "$codes"} || true
+fi
+echo "$verdict${codes:+ $codes}" 2>/dev/null || true
 case "$verdict" in
   DECIDE)   echo "next: decide, then team-log decision --from master${to:+ --to $to} --decided-by master --body ... --rationale '<why, what was rejected>'";;
   ASSUME)   echo "next: use a flagged placeholder; list it under ASSUMPTIONS in the plan you show the user";;
   ESCALATE) echo "next: add to the ONE batched AskUserQuestion (recommended option first); never ask it on its own";;
-esac
-if [ -z "$nolog" ]; then
-  "$DIR/team-log" gate --from master ${to:+--to "$to"} ${task:+--task "$task"} --body "$topic" --verdict "$verdict" ${codes:+--codes "$codes"} || true
-fi
+esac 2>/dev/null || true
 exit $rc
