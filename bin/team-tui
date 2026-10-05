@@ -283,6 +283,8 @@ def ui(scr, con, get_sources):
     curses.curs_set(0); curses.use_default_colors()
     for i in range(1, 7): curses.init_pair(i, i, -1)
     curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    grey = 240 if curses.COLORS >= 256 else curses.COLOR_BLACK  # selected row: soft grey, not a white block
+    curses.init_pair(8, -1, grey); curses.init_pair(9, curses.COLOR_GREEN, grey)
     scr.timeout(2000)
     feat = None; sel = ltop = top = maxtop = view = 0; qa = False; follow = True; msg = ""
     opened = {}      # ticket (fid) -> event lines the user expanded with o
@@ -302,7 +304,8 @@ def ui(scr, con, get_sources):
                 ltop = max(0, min(ltop, len(fs) - rows))
                 scr.addstr(0, 0, " Tickets / features ".ljust(lw)[:lw], curses.color_pair(7))
                 for i, f in enumerate(fs[ltop: ltop + rows]):
-                    attr = curses.A_REVERSE if ltop + i == sel else (curses.color_pair(2) if status(f) == "running" else 0)
+                    running = status(f) == "running"
+                    attr = curses.color_pair(9 if running else 8) if ltop + i == sel else (curses.color_pair(2) if running else 0)
                     scr.addstr(i + 1, 0, feature_line(f, lw).ljust(lw)[: lw - 1], attr)
                 if feat:
                     cur = fid(fs[sel]); body_w = w - lw - 2
