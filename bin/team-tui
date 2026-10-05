@@ -13,7 +13,7 @@ Cost model: a keypress never rebuilds the timeline. Lines are built once per (ti
 events appended since, and a body longer than BODY_PREVIEW lines is wrapped lazily: only its head, until you press o."""
 import os
 os.environ.setdefault("ESCDELAY", "25")  # curses waits this long after Esc for an escape sequence (default 1000 ms = a laggy 'back')
-import curses, glob, json, re, sqlite3, subprocess, sys, textwrap
+import curses, glob, json, re, sqlite3, subprocess, sys, textwrap, time
 from datetime import datetime, timezone
 
 def team_home(): return os.environ.get("TEAM_HOME") or os.path.expanduser("~/.claude/agent-team")
@@ -124,8 +124,11 @@ def sync(con, srcs):
 def features(con):
     """One row per ticket per repo, newest first. fid(row) = (src, feature) identifies it."""
     return con.execute("""select src, repo, feature, min(ts) first, max(ts) last, count(*) n,
-        sum(type='question') q, sum(type='decision') d, sum(type='review_finding') r,
+        sum(coalesce(tokens_in,0) + coalesce(tokens_cache,0) + coalesce(tokens_out,0)) tok, sum(coalesce(secs,0)) asecs,
         sum(type='agent_started') st, sum(type in ('worker_done','question') and agent_id is not null and agent_id!='') en,
+        max(case when type='feature_end' then line end) fe, max(case when type='agent_started' then line end) stl,
+        max(case when type='escalation' then line end) esc, max(case when type='user_reply' then line end) rep,
+        (select group_concat(body, ' ') from events x where x.src=e.src and x.feature=e.feature and x.type in ('pr','feature_end')) prtxt,
         (select body from events x where x.src=e.src and x.feature=e.feature and type='feature_start' limit 1) request,
         (select ticket from events x where x.src=e.src and x.feature=e.feature and x.ticket is not null and x.ticket!='' order by line desc limit 1) ticket,
         (select ttype from events x where x.src=e.src and x.feature=e.feature and x.ttype is not null and x.ttype!='' order by line desc limit 1) ttype,
@@ -134,10 +137,25 @@ def features(con):
 
 def fid(f): return (f["src"], f["feature"])
 
-def status(f): return "running" if f["st"] > f["en"] else "idle"
+def status(f):
+    """done = feature_end came after the last agent start (a later start reopens it); running = more agents started than reported back."""
+    if f["fe"] and f["fe"] > (f["stl"] or 0): return "done"
+    return "running" if f["st"] > f["en"] else "idle"
+
+def waiting(f):
+    """The master asked the user (escalation) and no user_reply came after it. A finished ticket waits for nobody."""
+    return status(f) != "done" and bool(f["esc"]) and f["esc"] > (f["rep"] or 0)
+
+def pr_ref(f):
+    """'#881' from the PR url (pr event) or 'PR #881' (feature_end note); the last one wins. '' when the ticket has no PR."""
+    hits = re.findall(r"(?:/pull/|PR #)(\d+)", f["prtxt"] or "")
+    return f"#{hits[-1]}" if hits else ""
 
 def ts(s): return datetime.strptime(s.split(".")[0].rstrip("Z"), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)  # ms optional
-def mmss(sec): return f"{int(sec)//60:02d}:{int(sec)%60:02d}"
+def mmss(sec):
+    """12:05 under an hour, 2:15:30 under a day, 1d 02:15 beyond."""
+    d, r = divmod(int(sec), 86400); h, r = divmod(r, 3600); m, s = divmod(r, 60)
+    return f"{d}d {h:02d}:{m:02d}" if d else f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 ICON = {"feature_start": "▶", "task_assigned": "→", "question": "?", "decision": "✔", "agent_started": "·",
         "worker_done": "■", "review_finding": "!", "stack_provisioned": "◆", "note": "·",
@@ -165,8 +183,8 @@ class Timeline:
     """[(text, color)] for ONE ticket (fid = (src, feature)) at one width/filter, built incrementally: update() folds in only the events appended
     since the last call, so scrolling never re-wraps anything. Durations pair agent_started/stop by agent_id.
     marks = [(index into lines, event line)] of the collapsed bodies; `expanded` = event lines shown in full."""
-    def __init__(s, feat, width, qa_only=False, expanded=(), everything=False):
-        s.feat, s.w, s.qa = feat, max(width - 6, 20), qa_only
+    def __init__(s, feat, width, qa_only=False, expanded=(), everything=False, tools=True):
+        s.feat, s.w, s.qa, s.tools = feat, max(width - 6, 20), qa_only, tools
         s.expanded, s.everything = frozenset(expanded), everything
         s.last = 0; s.t0 = None; s.starts = {}; s.lines = []; s.marks = []
 
@@ -184,7 +202,8 @@ class Timeline:
             dur = f" ({mmss((t - s.starts[aid]).total_seconds())})"
         if s.qa and r["type"] not in QA: return
         who = r["frm"] or ""
-        if r["type"] == "tool_call":  # one compact line each; hidden by the Q&A filter
+        if r["type"] == "tool_call":  # one compact line each; hidden by the Q&A filter and by the t toggle
+            if not s.tools: return
             out.append((f"+{mmss((t - s.t0).total_seconds())} · {who}: {(r['body'] or '')[:w]}", 0)); return
         if r["dst"]: who = f"{who}→{r['dst']}" if who else f"→{r['dst']}"
         head = f"+{mmss((t - s.t0).total_seconds())} {ICON.get(r['type'], '·')} {r['type']} {who}" + \
@@ -210,6 +229,18 @@ def timeline(con, feat, width, qa_only=False, full=True):
 
 def local(s): return ts(s).astimezone().strftime("%m-%d %H:%M")
 
+def span(sec):
+    """Length of time for a list column / the status line: '<1m', '43m', '2h43m', '1d03h'."""
+    sec = int(sec)
+    return "<1m" if sec < 60 else f"{sec // 60}m" if sec < 3600 else f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec < 86400 else f"{sec // 86400}d{sec % 86400 // 3600:02d}h"
+
+def wall(f): return (ts(f["last"]) - ts(f["first"])).total_seconds()  # first event to last: includes time spent waiting for the user
+
+def ago(s):
+    """Last activity: 'now', '5m ago', '3h ago', then the date once it is more than a day old."""
+    sec = (datetime.now(timezone.utc) - ts(s)).total_seconds()
+    return "now" if sec < 60 else f"{int(sec // 60)}m ago" if sec < 3600 else f"{int(sec // 3600)}h ago" if sec < 86400 else local(s)
+
 def ticket_label(f):
     """Ticket number FIRST: '[bug-8991] title'. Metadata (ticket_info / feature_start --ticket) wins; otherwise the
     number is read from the slug: type-8991-name, 8991-name or name-8991 (older logs). No number -> the slug."""
@@ -224,13 +255,19 @@ def ticket_label(f):
     if tt == "wi": tt = ""  # 'wi' = work item of unknown type: show the bare number
     return f"[{tt + '-' if tt else ''}{tid}] {name}".rstrip()
 
+def human(n):
+    """1234 -> '1.2k', 1234567 -> '1.2M'."""
+    n = n or 0
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.1f}k" if n >= 1e3 else str(n)
+
 def feature_line(f, w):
-    lab = ticket_label(f); mark = "●" if status(f) == "running" else " "; repo = f["repo"] or ""
+    lab = ticket_label(f); repo = f["repo"] or ""
+    mark = {"running": "●", "done": "✓"}.get(status(f), " ") + ("⇧" if waiting(f) else " ")  # state, then "waiting for you"
     if w < 72:  # split view: the ticket first, the repo on what is left
-        room = w - len(repo) - 4
+        room = w - len(repo) - 5
         return f"{mark} {lab:<{room}.{room}} {repo}" if room >= 24 else f"{mark} {lab}"
-    stats = f"{repo:<14.14} {local(f['first'])}  ev:{f['n']:<3} ?:{f['q']:<2} ✔:{f['d']:<2} !:{f['r']}"
-    return f"{mark} {lab:<{w - len(stats) - 4}.{w - len(stats) - 4}}  {stats}"
+    stats = f"{repo:<14.14} {pr_ref(f):<5} {ago(f['last']):<11} {span(wall(f)):>6} {human(f['tok']):>6} tok"
+    return f"{mark} {lab:<{w - len(stats) - 5}.{w - len(stats) - 5}}  {stats}"
 
 def dump(con, arg):
     """No arg: the ticket list. 'ticket' or 'repo/ticket': that timeline (every match, headed when several)."""
@@ -276,8 +313,8 @@ def pos_label(top, view, total):
     if total <= view: return f"all {total}"
     return f"{top + 1}-{min(top + view, total)}/{total}" + (" TOP" if top == 0 else " END" if top + view >= total else "")
 
-KEYS_LIST = " j/k move  g/G first/last  enter open  c copy  q quit "
-KEYS_TICKET = " j/k scroll  space/b page  g/G top/end  o/O expand  n/p ticket  c copy  f Q&A  esc back  q quit "
+KEYS_LIST = " j/k move  g/G first/last  enter open  c copy  q quit   ● running  ✓ done  ⇧ waiting for you "
+KEYS_TICKET = " j/k scroll  space/b page  g/G top/end  o/O expand  n/p ticket  c copy  f Q&A  t tools  esc back  q quit "
 
 def ui(scr, con, get_sources):
     curses.curs_set(0); curses.use_default_colors()
@@ -286,13 +323,14 @@ def ui(scr, con, get_sources):
     grey = 240 if curses.COLORS >= 256 else curses.COLOR_BLACK  # selected row: soft grey, not a white block
     curses.init_pair(8, -1, grey); curses.init_pair(9, curses.COLOR_GREEN, grey)
     scr.timeout(2000)
-    feat = None; sel = ltop = top = maxtop = view = 0; qa = False; follow = True; msg = ""
+    feat = None; sel = ltop = top = maxtop = view = 0; qa = False; tools = False; follow = True; msg = ""; minute = 0
     opened = {}      # ticket (fid) -> event lines the user expanded with o
     everything = set()  # tickets (fid) shown with every body expanded (O)
     tl = tlkey = None
     fs = features(con); dirty = True
     while True:
         if sync(con, get_sources()): fs = features(con); dirty = True
+        if minute != (minute := int(time.time() // 60)): dirty = True  # the "5m ago" column moves on its own
         if dirty:  # redraw only when a key, a resize or a new event changed something; an idle tick costs one stat per log
             dirty = False; h, w = scr.getmaxyx(); scr.erase()
             if not fs: scr.addstr(0, 0, "no events yet: no repo has logged (run team-log in a repo, or: team-tui --add <repo>)   (q quit)")
@@ -309,15 +347,16 @@ def ui(scr, con, get_sources):
                     scr.addstr(i + 1, 0, feature_line(f, lw).ljust(lw)[: lw - 1], attr)
                 if feat:
                     cur = fid(fs[sel]); body_w = w - lw - 2
-                    key = (cur, body_w, qa, frozenset(opened.get(cur, ())), cur in everything)
-                    if key != tlkey: tl = Timeline(cur, body_w, qa, key[3], key[4]); tlkey = key
+                    key = (cur, body_w, qa, frozenset(opened.get(cur, ())), cur in everything, tools)
+                    if key != tlkey: tl = Timeline(cur, body_w, qa, key[3], key[4], tools); tlkey = key
                     lines = tl.update(con)
                     view = h - 2; maxtop = max(0, len(lines) - view)
                     top = maxtop if follow else max(0, min(top, maxtop))
-                    scr.addstr(0, lw + 1, f" {ticket_label(fs[sel])}  ({fs[sel]['repo']}){'  [Q&A only]' if qa else ''} ".ljust(body_w)[:body_w], curses.color_pair(7))
+                    scr.addstr(0, lw + 1, f" {'[Q&A only] ' if qa else '[+tools] ' if tools else ''}{ticket_label(fs[sel])}  ({fs[sel]['repo']}) ".ljust(body_w)[:body_w], curses.color_pair(7))
                     for i, (t, c) in enumerate(lines[top: top + view]):
                         scr.addstr(i + 1, lw + 1, t[:body_w], curses.color_pair(c) if c else 0)
-                    status_line = f" {pos_label(top, view, len(lines))} |" + (f" {msg} |" if msg else "") + KEYS_TICKET
+                    timing = f" {span(wall(fs[sel]))} elapsed, {span(fs[sel]['asecs'])} agent time |"  # wall clock vs the sum of the agent runs (they overlap)
+                    status_line = f" {pos_label(top, view, len(lines))} |" + timing + (f" {msg} |" if msg else "") + KEYS_TICKET
                 else:
                     scr.addstr(h - 2, 0, (fs[sel]["request"] or "").replace("\n", " ")[: w - 1], curses.A_DIM)
                     status_line = (f" {msg} |" if msg else "") + KEYS_LIST
@@ -345,6 +384,7 @@ def ui(scr, con, get_sources):
         elif k in (ord("k"), curses.KEY_UP): sel -= 1
         elif k in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT, ord("l")): feat = True; follow = True
         elif k == curses.KEY_LEFT or k == ord("h"): feat = None
+        elif feat and k == ord("t"): tools = not tools
         elif k == ord("f"): qa = not qa
 
 def query(con, sql):
