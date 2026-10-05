@@ -364,4 +364,6 @@ if __name__ == "__main__":
     elif a[:1] == ["--query"]:
         if len(a) < 2: sys.exit("usage: team-tui --query SQL")
         query(con, a[1])
-    else: curses.wrapper(ui, con, srcs)
+    else:
+        try: curses.wrapper(ui, con, srcs)
+        except KeyboardInterrupt: pass  # Ctrl+C quits like q; wrapper has already restored the terminal
