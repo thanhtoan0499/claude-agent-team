@@ -20,7 +20,8 @@ def load(path=None):
 
 for _name in ("curs_set", "use_default_colors", "init_pair"):
     setattr(curses, _name, lambda *a, **k: None)
-curses.color_pair = lambda n: 0
+curses.color_pair = lambda n: n << 8  # like the real one: the pair number lives in bits 8+
+curses.COLORS = 256
 
 
 class Scr:
@@ -36,6 +37,12 @@ class Scr:
         return s.h, s.w
 
     def timeout(s, ms):
+        pass
+
+    def clear(s):
+        pass
+
+    def refresh(s):
         pass
 
     def erase(s):

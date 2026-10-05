@@ -35,7 +35,7 @@ def texts(s, i):  # ticket pane text after key i
 
 
 def selected(s, i):  # the highlighted row of the ticket list after key i
-    rows = [y for y, a in s.attrs[i + 1].items() if a & curses.A_REVERSE]
+    rows = [y for y, a in s.attrs[i + 1].items() if a >> 8 in (8, 9)]  # color pairs 8 / 9 = the selected row (grey, green when running)
     return s.frames[i + 1][rows[0]] if rows else ""
 
 
@@ -231,4 +231,25 @@ s = H.Scr(24, 120, [lambda: srcs.append(extra), -1])
 tt.ui(s, tt.open_db(os.path.join(scr_d, "team.db")), lambda: list(srcs))
 shown = " ".join(s.frames[-1].values())
 ok("[bug-700]" in " ".join(s.frames[0].values()) and "[bug-800]" in shown, "a repo registered while the TUI is open appears on the next tick")
+
+# ---- r: claude --resume <session> in the folder it ran in; refused with a reason otherwise ----
+import stat, subprocess
+curses.endwin = curses.reset_prog_mode = lambda: None
+bindir = tempfile.mkdtemp(); out = os.path.join(bindir, "called")
+with open(os.path.join(bindir, "claude"), "w") as fh: fh.write(f'#!/bin/sh\necho "$PWD $*" > {out}\n')
+os.chmod(os.path.join(bindir, "claude"), 0o755)
+work = tempfile.mkdtemp()
+row = dict(src=os.path.join(work, ".team-log"), session="sess-1", cwd=work, st=1, en=1, fe=None, stl=1)
+old_path = os.environ["PATH"]; os.environ["PATH"] = bindir + os.pathsep + old_path
+ok(tt.resume(row) == "" and open(out).read().split() == [os.path.realpath(work), "--resume", "sess-1"], "r runs claude --resume <session> in the session's folder")
+os.remove(out)
+ok("running" in tt.resume({**row, "st": 2}) and not os.path.exists(out), "a running ticket is not resumed (its session is live elsewhere)")
+ok(tt.resume({**row, "st": 2}, force=True) == "" and os.path.exists(out), "R resumes it anyway")
+ok("no session" in tt.resume({**row, "session": None}), "a ticket without a logged session says so")
+os.environ["PATH"] = "/nonexistent"
+ok("PATH" in tt.resume(row), "no claude binary -> message, not a crash")
+os.environ["PATH"] = old_path
+d = fresh(); H.write_log(d, "bug-5-old", [H.ev(0, "note", "x")])
+s = H.run(tt, d, ["r"])
+ok("no session" in H.footer(s, 1), f"r on a ticket without a session: {H.footer(s, 1)!r}")
 print("PASS")

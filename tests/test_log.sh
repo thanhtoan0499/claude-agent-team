@@ -156,8 +156,8 @@ jq -s -e 'map(select(.type=="ticket_info" and .ticket=="7001" and .ticket_type==
 ! "$B/team-log" ticket_info --ticket 9999 --title x 2>/dev/null || { echo "FAIL: ticket_info for unknown ticket accepted"; exit 1; }
 ! "$B/team-log" feature_start --ticket abc 2>/dev/null || { echo "FAIL: non-numeric ticket accepted"; exit 1; }
 # TUI: number first
-d=$("$B/team-tui" --dump); grep -q "^. \[bug-8991\] \[FE\]\[Serving\] Activate version mới" <<<"$d" || { echo "FAIL: tui label (ticket metadata): $d"; exit 1; }
-grep -q "^. \[7001\] Fix export\|^. \[task-7001\] Fix export" <<<"$d" || { echo "FAIL: tui label (reused): $d"; exit 1; }
+d=$("$B/team-tui" --dump); grep -q "^.. \[bug-8991\] \[FE\]\[Serving\] Activate version mới" <<<"$d" || { echo "FAIL: tui label (ticket metadata): $d"; exit 1; }
+grep -q "^.. \[7001\] Fix export\|^.. \[task-7001\] Fix export" <<<"$d" || { echo "FAIL: tui label (reused): $d"; exit 1; }
 # older logs without metadata: number read from the slug (type-N-name, name-N)
 mkdir -p .team-log/bug-5555-old-style .team-log/widget-thing-6666 .team-log/plain
 for f in bug-5555-old-style widget-thing-6666 plain; do "$B/team-log" note --feature $f --body x; done
@@ -175,6 +175,11 @@ PATH="$T/fakebin:$PATH" M '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'",
 for i in $(seq 30); do jq -s -e 'map(select(.type=="ticket_info"))|length>=1' .team-log/wi-8123/events.ndjson >/dev/null 2>&1 && break; sleep 0.2; done
 jq -s -e 'map(select(.type=="ticket_info" and .ticket_type=="bug" and .title=="Hook fetched title"))|length==1' .team-log/wi-8123/events.ndjson >/dev/null || { echo "FAIL: background team-ticket did not log ticket_info"; exit 1; }
 jq -s -e 'map(select(.type=="user_reply"))|length>=1' .team-log/wi-8123/events.ndjson >/dev/null || { echo "FAIL: the prompt itself not logged"; exit 1; }
+# the master's/user's events carry the session + folder (team-tui resumes it); a subagent's events do not
+M '{"hook_event_name":"UserPromptSubmit","session_id":"sess-xyz","cwd":"'"$T"'","prompt":"with a session"}'
+M '{"hook_event_name":"SubagentStart","session_id":"sess-xyz","cwd":"'"$T"'","agent_type":"agent-team:backend","agent_id":"ses1"}'
+jq -s -e 'map(select(.type=="user_reply" and .session=="sess-xyz" and .cwd=="'"$T"'"))|length==1' .team-log/wi-8123/events.ndjson >/dev/null || { echo "FAIL: user_reply lacks session/cwd"; exit 1; }
+jq -s -e 'map(select(.type=="agent_started" and .agent_id=="ses1" and (has("session")|not)))|length==1' .team-log/wi-8123/events.ndjson >/dev/null || { echo "FAIL: subagent event carries a session"; exit 1; }
 "$B/team-tui" --dump | grep -q "\[bug-8123\] Hook fetched title" || { echo "FAIL: tui label after hook"; exit 1; }
 # repeating the prompt while that feature is active does not start another; a prompt without team-lead never starts one
 n=$(ls .team-log | wc -l)

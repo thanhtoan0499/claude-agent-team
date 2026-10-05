@@ -48,7 +48,11 @@ agent=$(jq -r '.agent_type // "unknown"' <<<"$in")
 id=$(jq -r '.agent_id // empty' <<<"$in")
 cwd=$(jq -r '.cwd // empty' <<<"$in"); [ -n "$cwd" ] || cwd=$PWD
 sid=$(jq -r '.session_id // empty' <<<"$in")
-log() { ( cd "$cwd" && "$DIR/team-log" "$@" ) 2>/dev/null || true; }
+# Main-thread events (the master and the user) carry the session and its folder, so team-tui can `claude --resume` the ticket.
+log() {
+  local who=(); [ -z "$id" ] && [ -n "$sid" ] && who=(--session "$sid" --cwd "$cwd")
+  ( cd "$cwd" && "$DIR/team-log" "$@" ${who[@]+"${who[@]}"} ) 2>/dev/null || true
+}
 MAX=30000  # sanity cap on one logged body
 J() { jq -r "$1" <<<"$in"; }  # extract with a jq filter from the payload
 

@@ -13,7 +13,7 @@ Cost model: a keypress never rebuilds the timeline. Lines are built once per (ti
 events appended since, and a body longer than BODY_PREVIEW lines is wrapped lazily: only its head, until you press o."""
 import os
 os.environ.setdefault("ESCDELAY", "25")  # curses waits this long after Esc for an escape sequence (default 1000 ms = a laggy 'back')
-import curses, glob, json, re, sqlite3, subprocess, sys, textwrap, time
+import curses, glob, json, re, signal, sqlite3, subprocess, sys, textwrap, time
 from datetime import datetime, timezone
 
 def team_home(): return os.environ.get("TEAM_HOME") or os.path.expanduser("~/.claude/agent-team")
@@ -61,11 +61,11 @@ def open_db(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     con = sqlite3.connect(path); con.row_factory = sqlite3.Row
     cols = [r[1] for r in con.execute("pragma table_info(events)")]
-    if cols and "turns" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
+    if cols and "cwd" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
     con.execute("""create table if not exists events(src text, repo text, feature text, line int, ts text, type text,
         frm text, dst text, task text, body text, rationale text, options text, agent_id text, ticket text, ttype text,
         title text, decided_by text, verdict text, codes text, plugin_version text, model text,
-        tokens_in int, tokens_cache int, tokens_out int, secs int, turns int,
+        tokens_in int, tokens_cache int, tokens_out int, secs int, turns int, session text, cwd text,
         primary key(src, feature, line))""")
     con.execute("create index if not exists ev_type on events(type)")
     return con
@@ -109,12 +109,12 @@ def sync(con, srcs):
                     except ValueError:
                         if not whole: break  # half-written tail: pick it up once the writer finishes it
                         n += 1; off += len(raw); continue  # garbled line: skip, keep numbering
-                    new += con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    new += con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (src, repo, feat, n + 1, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
                          e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id"),
                          e.get("ticket"), e.get("ticket_type"), e.get("title"),
                          e.get("decided_by"), e.get("verdict"), e.get("codes"), e.get("plugin_version"), e.get("model"),
-                         e.get("tokens_in"), e.get("tokens_cache"), e.get("tokens_out"), e.get("secs"), e.get("turns"))).rowcount
+                         e.get("tokens_in"), e.get("tokens_cache"), e.get("tokens_out"), e.get("secs"), e.get("turns"), e.get("session"), e.get("cwd"))).rowcount
                     if not whole: break  # complete JSON but no newline yet: keep it, re-read (and ignore the duplicate) later
                     n += 1; off += len(raw)
             _seen[f] = (n, off)
@@ -131,6 +131,8 @@ def features(con):
         (select group_concat(body, ' ') from events x where x.src=e.src and x.feature=e.feature and x.type in ('pr','feature_end')) prtxt,
         (select body from events x where x.src=e.src and x.feature=e.feature and type='feature_start' limit 1) request,
         (select ticket from events x where x.src=e.src and x.feature=e.feature and x.ticket is not null and x.ticket!='' order by line desc limit 1) ticket,
+        (select session from events x where x.src=e.src and x.feature=e.feature and x.session is not null and x.session!='' order by line desc limit 1) session,
+        (select cwd from events x where x.src=e.src and x.feature=e.feature and x.session is not null and x.session!='' order by line desc limit 1) cwd,
         (select ttype from events x where x.src=e.src and x.feature=e.feature and x.ttype is not null and x.ttype!='' order by line desc limit 1) ttype,
         (select title from events x where x.src=e.src and x.feature=e.feature and x.title is not null and x.title!='' order by line desc limit 1) title
         from events e group by src, feature order by last desc""").fetchall()
@@ -313,8 +315,8 @@ def pos_label(top, view, total):
     if total <= view: return f"all {total}"
     return f"{top + 1}-{min(top + view, total)}/{total}" + (" TOP" if top == 0 else " END" if top + view >= total else "")
 
-KEYS_LIST = " j/k move  g/G first/last  enter open  c copy  q quit   ● running  ✓ done  ⇧ waiting for you "
-KEYS_TICKET = " j/k scroll  space/b page  g/G top/end  o/O expand  n/p ticket  c copy  f Q&A  t tools  esc back  q quit "
+KEYS_LIST = " j/k move  g/G first/last  enter open  r resume  c copy  q quit   ● running  ✓ done  ⇧ waiting for you "
+KEYS_TICKET = " j/k scroll  space/b page  g/G top/end  o/O expand  n/p ticket  r resume  c copy  f Q&A  t tools  esc back  q quit "
 
 def ui(scr, con, get_sources):
     curses.curs_set(0); curses.use_default_colors()
@@ -385,7 +387,24 @@ def ui(scr, con, get_sources):
         elif k in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT, ord("l")): feat = True; follow = True
         elif k == curses.KEY_LEFT or k == ord("h"): feat = None
         elif feat and k == ord("t"): tools = not tools
+        elif k in (ord("r"), ord("R")) and fs:
+            msg = resume(fs[sel], k == ord("R")); scr.clear(); scr.refresh()
         elif k == ord("f"): qa = not qa
+
+def resume(f, force=False):
+    """Hand the terminal to `claude --resume <the ticket's last session>`, in the folder that session ran in. -> message ('' = it ran)."""
+    if not f["session"]: return "no session logged for this ticket (only tickets run since 0.1.23 record one)"
+    if status(f) == "running" and not force: return "ticket is running: its session is live in another terminal (R resumes anyway)"
+    cwd = f["cwd"] if f["cwd"] and os.path.isdir(f["cwd"]) else os.path.dirname(f["src"].rstrip("/"))
+    curses.endwin()
+    try:
+        # Ctrl+C belongs to claude while it runs; tt ignores it meanwhile and the child gets the default handler back.
+        old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try: subprocess.run(["claude", "--resume", f["session"]], cwd=cwd, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        finally: signal.signal(signal.SIGINT, old)
+        return ""
+    except FileNotFoundError: return "`claude` is not on PATH"
+    finally: curses.reset_prog_mode(); curses.curs_set(0)
 
 def query(con, sql):
     """Read-only: a second connection opened mode=ro, so nothing typed here can change the index."""
