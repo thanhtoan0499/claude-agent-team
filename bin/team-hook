@@ -7,9 +7,11 @@
 #                          + the model it really ran on and its usage (tokens in/cache/out, seconds, turns) from its transcript
 #   PostToolUse         -> tool_call (one line: tool + key input)
 #   PostToolUseFailure  -> error
-# main thread (the master + the user), ONLY while a feature is active (.team-log/CURRENT touched < 12 h ago) AND only from the
-#   session bound to it (.team-log/CURRENT.session, written when that session opens the feature): another Claude Code
-#   session in the same repo is not the team, its prompts never reach the ticket's log.
+# Every event goes to the feature of the session it came from (.team-log/sessions/<session id>, written when that session
+#   opens the feature): two sessions running two tickets in one repo each log into their own ticket, subagents included.
+# main thread (the master + the user), ONLY from a session bound to a feature touched < 12 h ago (no session id in the
+#   payload: while .team-log/CURRENT is): another Claude Code session in the same repo is not the team, its prompts never
+#   reach a ticket's log.
 #   PostToolUse Bash `team-log feature_start ...` -> binds the session that ran it (re-run it to continue in a new session)
 #   PostToolUse Bash `gh pr create ...`           -> pr (the PR URL) then feature_end: the ticket's log closes itself
 #   UserPromptSubmit                   -> user_reply   (the user's prompt, verbatim)
@@ -48,6 +50,7 @@ agent=$(jq -r '.agent_type // "unknown"' <<<"$in")
 id=$(jq -r '.agent_id // empty' <<<"$in")
 cwd=$(jq -r '.cwd // empty' <<<"$in"); [ -n "$cwd" ] || cwd=$PWD
 sid=$(jq -r '.session_id // empty' <<<"$in")
+[ -n "$sid" ] && export TEAM_SESSION=$sid   # team_feature (here and in team-log) routes by it
 # Main-thread events (the master and the user) carry the session and its folder, so team-tui can `claude --resume` the ticket.
 log() {
   local who=(); [ -z "$id" ] && [ -n "$sid" ] && who=(--session "$sid" --cwd "$cwd")
@@ -134,30 +137,36 @@ team_agent_event() {
   esac
 }
 
-# Is a feature being run right now, by THIS session? CURRENT exists and was touched (by any logged event) within 12 h, and
-# the session bound to it is this one (no binding yet, or no session id in the payload: any session, the pre-0.1.17 rule).
+# Is a feature being run right now, by THIS session? Its binding exists and was touched (by any logged event) within 12 h.
+# No binding: only when no session at all is bound to CURRENT (a feature opened from a plain shell), CURRENT is fresh, the pre-0.1.17 rule.
+fresh() { [ -s "$1" ] && [ -n "$(find "$1" -mmin -720 2>/dev/null)" ]; }
 feature_active() {
-  local cur bound; cur="$(team_root "$cwd")/.team-log/CURRENT"
-  [ -s "$cur" ] && [ -n "$(find "$cur" -mmin -720 2>/dev/null)" ] || return 1
-  bound=$(cat "$(team_session_file "$cwd")" 2>/dev/null || true)
-  [ -z "$bound" ] || [ -z "$sid" ] || [ "$bound" = "$sid" ]
+  local cur b f; cur="$(team_root "$cwd")/.team-log/CURRENT"
+  if [ -n "$sid" ]; then
+    b=$(team_binding "$cwd")
+    if [ -s "$b" ]; then fresh "$b"; return; fi
+    [ "$(cat "$cur.session" 2>/dev/null)" = "$sid" ] && { fresh "$cur"; return; }   # pre-0.1.24 binding
+    [ -s "$cur.session" ] && return 1
+    f=$(head -1 "$cur" 2>/dev/null) || return 1
+    grep -qxF -- "$f" "$(dirname "$cur")"/sessions/* 2>/dev/null && return 1
+  fi
+  fresh "$cur"
 }
 
-# This session runs the active feature from now on.
-bind_session() { [ -n "$sid" ] && echo "$sid" > "$(team_session_file "$cwd")" 2>/dev/null || true; }
+# This session runs <feature> from now on.
+bind_session() { [ -n "$sid" ] && team_bind "$1" "$cwd"; return 0; }
 
 # `/agent-team:team-lead ...<ticket>` -> open (or reuse) the feature for that ticket right away.
 auto_start_feature() {
-  local p=$1 tid url cur
+  local p=$1 tid url f
   grep -qE '^[[:space:]]*/(agent-team:)?team-lead([[:space:]]|$)' <<<"$p" || return 0
   tid=$(grep -oE '_workitems/edit/[0-9]+' <<<"$p" | head -1 | grep -oE '[0-9]+' || true)
   [ -n "$tid" ] || tid=$(grep -oE 'AB#[0-9]+' <<<"$p" | head -1 | grep -oE '[0-9]+' || true)
   [ -n "$tid" ] || return 0
-  cur="$(team_root "$cwd")/.team-log/CURRENT"
-  # Already the active feature (e.g. continued in a new session): just take it over.
-  [ -s "$cur" ] && [ -n "$(find "$cur" -mmin -720 2>/dev/null)" ] && head -1 "$cur" | grep -qE "(^|-)${tid}(-|\$)" && { bind_session; return 0; }
-  log feature_start --ticket "$tid" --from user --body "${p:0:$MAX}"
-  bind_session
+  # Already tracked and active (e.g. continued in a new session): this session just takes it over.
+  f=$(team_ticket_feature "$tid" "$cwd")
+  if [ -n "$f" ] && fresh "$(team_root "$cwd")/.team-log/$f/events.ndjson"; then bind_session "$f"; return 0; fi
+  log feature_start --ticket "$tid" --from user --body "${p:0:$MAX}"   # team-log binds this session (TEAM_SESSION)
   url=$(grep -oE 'https://dev\.azure\.com/[^[:space:]]*_workitems/edit/[0-9]+' <<<"$p" | head -1 || true)
   ( cd "$cwd" && nohup "$DIR/team-ticket" "$tid" ${url:+"$url"} >/dev/null 2>&1 </dev/null & ) 2>/dev/null || true
 }
@@ -182,11 +191,13 @@ card_due() {
 }
 
 master_event() {
-  local tool to desc body q
+  local tool to desc body q b
   [ -z "$id" ] || return 0                           # subagent calls are handled above; this is the main thread
   if [ "$ev" = PostToolUse ] && [ "$(J '.tool_name // empty')" = Bash ] \
      && grep -qE '(^|[/[:space:];&|])team-log[[:space:]]+feature_start' <<<"$(J '.tool_input.command // empty')"; then
-    bind_session; return 0                           # the master opened (or re-opened) the feature from this session
+    # team-log bound this session itself when Claude Code gave it CLAUDE_CODE_SESSION_ID; otherwise bind it to what was just started
+    b=$(team_binding "$cwd"); [ -n "$(find "$b" -mmin -1 2>/dev/null)" ] || bind_session "$(head -1 "$(team_root "$cwd")/.team-log/CURRENT" 2>/dev/null)"
+    return 0
   fi
   if [ "$ev" = UserPromptSubmit ]; then
     body=$(J '.prompt // .user_prompt // empty')
@@ -233,7 +244,7 @@ master_event() {
       grep -qE '(^|[;&|[:space:]])gh[[:space:]]+pr[[:space:]]+create' <<<"$(J '.tool_input.command // empty')" || return 0
       body=$(J '.tool_response | if type=="string" then . else tojson end' | grep -oE 'https://github\.com/[^[:space:]"\\]+/pull/[0-9]+' | tail -1 || true)
       [ -n "$body" ] || return 0
-      to=$(head -1 "$(team_root "$cwd")/.team-log/CURRENT")
+      to=$( cd "$cwd" && team_feature )
       log pr --from master --feature "$to" --body "$body"
       log feature_end --from master --feature "$to" --body "PR opened: $body" ;;
     PostToolUseFailure:AskUserQuestion|PostToolUseFailure:Agent|PostToolUseFailure:Task|PostToolUseFailure:SendMessage)

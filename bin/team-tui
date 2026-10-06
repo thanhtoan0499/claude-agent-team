@@ -57,9 +57,13 @@ def make_sources():
 def db_path():
     return os.path.join(os.environ["TEAM_LOG_DIR"] if os.environ.get("TEAM_LOG_DIR") else team_home(), "team.db")
 
+class Conn(sqlite3.Connection):
+    """The index connection; carries the Clock of its tickets (rebuilt with the connection, never shared between DBs)."""
+    def __init__(s, *a, **k): super().__init__(*a, **k); s.clock = Clock()
+
 def open_db(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    con = sqlite3.connect(path); con.row_factory = sqlite3.Row
+    con = sqlite3.connect(path, factory=Conn); con.row_factory = sqlite3.Row
     cols = [r[1] for r in con.execute("pragma table_info(events)")]
     if cols and "cwd" not in cols: con.execute("drop table events")  # derived index: rebuilt from the NDJSON
     con.execute("""create table if not exists events(src text, repo text, feature text, line int, ts text, type text,
@@ -83,6 +87,10 @@ def _skip(f, n):
 
 def repo_name(src): return os.path.basename(os.path.dirname(os.path.abspath(src).rstrip("/"))) or src
 
+def reindex(con, src, feat):
+    con.execute("delete from events where src=? and feature=?", (src, feat))
+    if isinstance(con, Conn): con.clock.drop((src, feat))
+
 def sync(con, srcs):
     """Ingest events appended since the last call to every log folder in srcs, reading only the new bytes (a keypress
     must not re-read the whole log). -> number of new events."""
@@ -96,10 +104,10 @@ def sync(con, srcs):
             if f not in _seen:  # first look in this process: resume after what the DB already holds
                 done = con.execute("select coalesce(max(line),0) from events where src=? and feature=?", (src, feat)).fetchone()[0]
                 c, off = _skip(f, done)
-                if c < done: con.execute("delete from events where src=? and feature=?", (src, feat)); c = off = 0  # log replaced: reindex
+                if c < done: reindex(con, src, feat); c = off = 0  # log replaced
                 _seen[f] = (c, off)
             n, off = _seen[f]
-            if size < off: con.execute("delete from events where src=? and feature=?", (src, feat)); n = off = 0  # log truncated: reindex
+            if size < off: reindex(con, src, feat); n = off = 0  # log truncated
             if size == off: _seen[f] = (n, off); continue
             with open(f, "rb") as fh:
                 fh.seek(off)
@@ -121,10 +129,48 @@ def sync(con, srcs):
     con.commit()
     return new
 
+IDLE = 15 * 60     # a gap between two events of a ticket longer than this, with no agent running, is time away (night, waiting for you)
+STALE = 2 * 3600   # agents "still running" but the ticket silent this long: the run died or its events went elsewhere; also caps a gap
+
+class Clock:
+    """Time and tokens per ticket, folded in event by event (rowid = append order, so only new rows are read each call).
+    active = gaps between consecutive events, each capped at IDLE (STALE while an agent runs): wall clock minus time away.
+    agent  = agent_started -> its first worker_done/question, per agent_id (a resume is a new start; a repeated report is ignored).
+    tok    = per agent its LARGEST usage: a resumed agent's transcript keeps the earlier runs, so every report repeats them."""
+    def __init__(s): s.row = 0; s.t = {}
+
+    def drop(s, f): s.t.pop(f, None)
+
+    def update(s, con):
+        rows = con.execute("""select rowid, src, feature, (julianday(ts) - 2440587.5) * 86400.0 t, type, agent_id, turns,
+            coalesce(tokens_in,0) + coalesce(tokens_cache,0) + coalesce(tokens_out,0) tok from events where rowid>? order by rowid""", (s.row,)).fetchall()
+        for r in rows:
+            k = s.t.setdefault((r[1], r[2]), {"last": None, "open": {}, "active": 0.0, "agent": 0.0, "tok": {}})
+            t, aid = r[3], r[5]
+            if t is None: continue
+            if k["last"] is not None: k["active"] += min(max(0.0, t - k["last"]), STALE if k["open"] else IDLE)
+            k["last"] = t if k["last"] is None else max(k["last"], t)
+            if r[4] == "agent_started" and aid: k["open"][aid] = t
+            elif r[4] in ("worker_done", "question") and aid in k["open"]: k["agent"] += max(0.0, t - k["open"].pop(aid))
+            if r[6] is not None: key = aid or f"#{r[0]}"; k["tok"][key] = max(k["tok"].get(key, 0), r[7])
+        if rows: s.row = rows[-1][0]
+        return s
+
+    def get(s, f):
+        k = s.t.get(f)
+        return (0, 0, 0) if not k else (round(k["active"]), round(k["agent"]), sum(k["tok"].values()))  # julianday is a float: round, not truncate
+
 def features(con):
-    """One row per ticket per repo, newest first. fid(row) = (src, feature) identifies it."""
+    """One row (a dict) per ticket per repo, newest first. fid(row) = (src, feature) identifies it.
+    tok / asecs / active come from the Clock (see there), not from summing the per-event usage."""
+    clock = con.clock.update(con) if isinstance(con, Conn) else Clock().update(con)
+    out = []
+    for r in _features(con):
+        f = dict(r); f["active"], f["asecs"], f["tok"] = clock.get(fid(f)); out.append(f)
+    return out
+
+def _features(con):
     return con.execute("""select src, repo, feature, min(ts) first, max(ts) last, count(*) n,
-        sum(coalesce(tokens_in,0) + coalesce(tokens_cache,0) + coalesce(tokens_out,0)) tok, sum(coalesce(secs,0)) asecs,
         sum(type='agent_started') st, sum(type in ('worker_done','question') and agent_id is not null and agent_id!='') en,
         max(case when type='feature_end' then line end) fe, max(case when type='agent_started' then line end) stl,
         max(case when type='escalation' then line end) esc, max(case when type='user_reply' then line end) rep,
@@ -140,9 +186,11 @@ def features(con):
 def fid(f): return (f["src"], f["feature"])
 
 def status(f):
-    """done = feature_end came after the last agent start (a later start reopens it); running = more agents started than reported back."""
+    """done = feature_end came after the last agent start (a later start reopens it); running = more agents started than
+    reported back AND the ticket logged something within STALE (an agent whose report never arrived does not run forever)."""
     if f["fe"] and f["fe"] > (f["stl"] or 0): return "done"
-    return "running" if f["st"] > f["en"] else "idle"
+    if f["st"] <= f["en"]: return "idle"
+    return "idle" if f.get("last") and (datetime.now(timezone.utc) - ts(f["last"])).total_seconds() > STALE else "running"
 
 def waiting(f):
     """The master asked the user (escalation) and no user_reply came after it. A finished ticket waits for nobody."""
@@ -268,7 +316,7 @@ def feature_line(f, w):
     if w < 72:  # split view: the ticket first, the repo on what is left
         room = w - len(repo) - 5
         return f"{mark} {lab:<{room}.{room}} {repo}" if room >= 24 else f"{mark} {lab}"
-    stats = f"{repo:<14.14} {pr_ref(f):<5} {ago(f['last']):<11} {span(wall(f)):>6} {human(f['tok']):>6} tok"
+    stats = f"{repo:<14.14} {pr_ref(f):<5} {ago(f['last']):<11} {span(f['active']):>6} {human(f['tok']):>6} tok"  # active time, not first-to-last
     return f"{mark} {lab:<{w - len(stats) - 5}.{w - len(stats) - 5}}  {stats}"
 
 def dump(con, arg):
@@ -357,7 +405,7 @@ def ui(scr, con, get_sources):
                     scr.addstr(0, lw + 1, f" {'[Q&A only] ' if qa else '[+tools] ' if tools else ''}{ticket_label(fs[sel])}  ({fs[sel]['repo']}) ".ljust(body_w)[:body_w], curses.color_pair(7))
                     for i, (t, c) in enumerate(lines[top: top + view]):
                         scr.addstr(i + 1, lw + 1, t[:body_w], curses.color_pair(c) if c else 0)
-                    timing = f" {span(wall(fs[sel]))} elapsed, {span(fs[sel]['asecs'])} agent time |"  # wall clock vs the sum of the agent runs (they overlap)
+                    timing = f" {span(fs[sel]['active'])} active ({span(wall(fs[sel]))} span), {span(fs[sel]['asecs'])} agent time |"  # active excludes time away; agent runs overlap
                     status_line = f" {pos_label(top, view, len(lines))} |" + timing + (f" {msg} |" if msg else "") + KEYS_TICKET
                 else:
                     scr.addstr(h - 2, 0, (fs[sel]["request"] or "").replace("\n", " ")[: w - 1], curses.A_DIM)

@@ -92,11 +92,21 @@ line=$(jq -cn --arg ts "$ts" --arg feature "$(team_feature)" --arg type "$type" 
 # the pipe/stdio buffer (~4 KB) interleave and corrupt the NDJSON (measured: 24 writers x 30 KB -> 11 bad lines).
 append() { printf '%s\n' "$line" >> "$file"; }
 if command -v flock >/dev/null 2>&1; then ( flock -x 9; append ) 9>>"$file.lock"; else append; fi
-# CURRENT = the feature whose master/user events the hook should capture. feature_start sets it, any event of that
-# feature refreshes its mtime (the hook treats it as stale after 12 h idle), feature_end clears it.
-r=$(team_root); cur="$r/.team-log/CURRENT"
-if [ -n "$start" ]; then mkdir -p "$r/.team-log"; team_feature > "$cur"
-elif [ -f "$cur" ] && [ "$(head -1 "$cur")" = "$(team_feature)" ]; then
-  if [ "$type" = feature_end ]; then rm -f "$cur" "$cur.session"; else touch "$cur"; fi
+# CURRENT = the feature most recently started in this repo: the fallback for an event that no session binding routes (no
+# session id). sessions/<id> = the feature that session runs (team_bind). feature_start sets both, any event of that feature
+# refreshes their mtime (the hook treats them as stale after 12 h idle), feature_end clears CURRENT and every binding to it.
+r=$(team_root); cur="$r/.team-log/CURRENT"; feat=$(team_feature); b=$(team_binding || true)
+if [ -n "$start" ]; then
+  mkdir -p "$r/.team-log"
+  # pre-0.1.24 single binding: keep that session on its feature before CURRENT moves on
+  old=$(cat "$cur.session" 2>/dev/null || true)
+  [ -n "$old" ] && [ -s "$cur" ] && TEAM_SESSION=$old team_bind "$(head -1 "$cur")"
+  rm -f "$cur.session"; echo "$feat" > "$cur"; team_bind "$feat"
+elif [ "$type" = feature_end ]; then
+  [ "$(head -1 "$cur" 2>/dev/null)" = "$feat" ] && rm -f "$cur" "$cur.session"
+  for s in "$r/.team-log/sessions"/*; do [ -f "$s" ] && [ "$(head -1 "$s")" = "$feat" ] && rm -f "$s"; done
+else
+  [ -f "$cur" ] && [ "$(head -1 "$cur")" = "$feat" ] && touch "$cur"
+  [ -n "$b" ] && [ -f "$b" ] && [ "$(head -1 "$b")" = "$feat" ] && touch "$b"
 fi
 exit 0

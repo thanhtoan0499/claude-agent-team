@@ -53,9 +53,17 @@ The master may only raise a model per dispatch (size L, R2 diagnosis, re-dispatc
 
 ## Logging for optimisation (v0.1.17)
 - **Only the team's session is logged.** The session that opens the feature (`/agent-team:team-lead <ticket>` or `team-log feature_start`)
-  is bound in `.team-log/CURRENT.session`; prompts from another Claude Code session in the same repo never reach the ticket's log.
-  A new session on the same ticket re-runs `feature_start` to take over.
-- **Worktrees log into the active feature**, not into a slug per worktree name (the old cause of one ticket showing as 2-3 tickets).
+  is bound in `.team-log/sessions/<session id>` (since 0.1.24; before, one `CURRENT.session` per repo); prompts from another Claude
+  Code session in the same repo never reach the ticket's log. A new session on the same ticket re-runs `feature_start` (or
+  `/agent-team:team-lead <ticket>`) to take over.
+- **Every event goes to its session's ticket** (0.1.24): two sessions running two tickets in one repo at once each log into their
+  own ticket, their subagents' events included (the hook routes by the payload's `session_id`, a `team-log` run from Bash by
+  `CLAUDE_CODE_SESSION_ID`). Without a session: a worktree named after a ticket (`serving-8810`) logs into the feature tracking
+  that ticket, else the active feature (`CURRENT`), never a slug per worktree name while one is active.
+- **Time and tokens in `team-tui`** (0.1.24): the list shows *active* time (gaps between events capped at 15 min, 2 h while an agent
+  runs: nights and waits for you do not count); the ticket footer shows active time, the first-to-last span and agent time
+  (agent_started -> its report, per run). Tokens count each agent once at its largest report: a resumed agent's transcript
+  repeats its earlier runs. A ticket whose agents never reported back stops showing ● after 2 h of silence.
 - **Cost per agent run.** `worker_done`/`question` carry the model it really ran on and `tokens_in`, `tokens_cache`, `tokens_out`,
   `secs`, `turns`, read from the subagent transcript; `team.db` has the same columns, `team-tui` shows model + tokens per report.
 - **The PR closes the log.** `gh pr create` by the master -> `pr` (URL) + `feature_end`, by the hook.
@@ -91,8 +99,8 @@ Adapted third-party material and licences: `THIRD_PARTY.md`. A wrong skill name 
 changing wiring run `bash tests/smoke_preload.sh` (manual, costs a few cents) to see which skills the agent really received.
 
 ## Log
-`<repo>/.team-log/<feature>/events.ndjson`, one JSON per line. Worktrees share the main repo's log; the
-worktree name is the feature slug.
+`<repo>/.team-log/<feature>/events.ndjson`, one JSON per line. Worktrees share the main repo's log; with no session
+binding, no ticket number in the worktree name and no active feature, the worktree name is the feature slug.
 
 | type | written by |
 |---|---|
@@ -102,7 +110,7 @@ worktree name is the feature slug.
 | `gate` (verdict + codes for one open question) | `team-gate` |
 | `agent_started`, `worker_done`, `question` | `SubagentStart/Stop` hook. Body = the agent's FULL final report (read from the subagent transcript when the agent ends via `SubagentHandback`); a `NEEDS_DECISION` line makes it a `question`; `ref` = path of the agent's transcript |
 | `tool_call`, `error` | `PostToolUse` / `PostToolUseFailure` hook for agent-team agents (one line per call) |
-| `task_assigned` (master's brief), `escalation` (question to the user), `user_reply` (user prompt / answer), `error` (failed Agent/SendMessage/AskUserQuestion) | main-thread hooks (`PreToolUse` Agent/SendMessage/AskUserQuestion, `UserPromptSubmit`, `PostToolUse(Failure)`), **only while a feature is active, from the session bound to it**: `.team-log/CURRENT` set by `feature_start`, refreshed by every event, expires after 12 h idle, cleared by `feature_end`; `.team-log/CURRENT.session` = that session |
+| `task_assigned` (master's brief), `escalation` (question to the user), `user_reply` (user prompt / answer), `error` (failed Agent/SendMessage/AskUserQuestion) | main-thread hooks (`PreToolUse` Agent/SendMessage/AskUserQuestion, `UserPromptSubmit`, `PostToolUse(Failure)`), **only while a feature is active, from the session bound to it**: `.team-log/CURRENT` set by `feature_start`, refreshed by every event, expires after 12 h idle, cleared by `feature_end`; `.team-log/sessions/<id>` = the feature each session runs |
 
 Appends are serialised with `flock` (parallel agents with large bodies would otherwise interleave lines). Timestamps carry milliseconds where GNU `date` supports it.
 

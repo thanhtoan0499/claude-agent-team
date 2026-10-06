@@ -23,23 +23,43 @@ team_version() {
   sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../.claude-plugin/plugin.json" 2>/dev/null | head -1 || true
 }
 
-# Feature slug: $TEAM_FEATURE > active CURRENT (touched < 12 h) > worktree name (.claude/worktrees/<name>) > stale CURRENT > "default".
-# An active feature wins over the worktree name: the team's builders run in a worktree named after the branch (fix-8991), and
-# their events must land in the ticket's feature (bug-8991-...), not in a second slug per worktree.
-team_feature() {
-  local cwd="${1:-$PWD}" cur
-  [ -n "${TEAM_FEATURE:-}" ] && { echo "$TEAM_FEATURE"; return; }
-  cur="$(team_root "$cwd")/.team-log/CURRENT"
-  if [ -s "$cur" ] && [ -n "$(find "$cur" -mmin -720 2>/dev/null)" ]; then head -1 "$cur"; return; fi
-  case "$cwd" in
-    */.claude/worktrees/*) local rest="${cwd#*/.claude/worktrees/}"; echo "${rest%%/*}"; return ;;
-  esac
-  if [ -s "$cur" ]; then head -1 "$cur"; else echo default; fi
+# Claude Code session this process belongs to: the hook passes its payload's session_id as TEAM_SESSION; a team-log that the
+# master or an agent runs from Bash inherits CLAUDE_CODE_SESSION_ID from Claude Code (the same id).
+team_session() { echo "${TEAM_SESSION:-${CLAUDE_CODE_SESSION_ID:-}}"; }
+
+# Session -> feature: .team-log/sessions/<session id> holds the feature that session runs. Two sessions can run two tickets in
+# one repo at the same time; one repo-wide CURRENT cannot tell their events apart (the other session's feature_start
+# re-points it, its feature_end deletes it, and the first ticket's agents log into the wrong ticket or a stray worktree slug).
+team_binding() { local s; s=$(team_session); [ -n "$s" ] || return 1; echo "$(team_root "${1:-$PWD}")/.team-log/sessions/$s"; }
+team_bound_feature() {
+  local b cur; b=$(team_binding "$1") || return 0
+  if [ -s "$b" ]; then head -1 "$b"; return 0; fi
+  cur="$(team_root "${1:-$PWD}")/.team-log/CURRENT"   # pre-0.1.24 binding: CURRENT.session names this session -> it runs CURRENT
+  if [ -s "$cur" ] && [ "$(cat "$cur.session" 2>/dev/null)" = "$(team_session)" ]; then head -1 "$cur"; fi
+  return 0
+}
+team_bind() {  # <feature> [cwd]: this session runs <feature> from now on; a session that ran it before (resumed elsewhere) no longer does
+  local b o; [ -n "$1" ] && b=$(team_binding "${2:-$PWD}") || return 0
+  { mkdir -p "$(dirname "$b")" && echo "$1" > "$b"; } 2>/dev/null || return 0
+  for o in "$(dirname "$b")"/*; do [ "$o" != "$b" ] && [ "$(head -1 "$o" 2>/dev/null)" = "$1" ] && rm -f "$o"; done; return 0
 }
 
-# Claude Code session bound to the active feature: only that session's main-thread events (user prompts, briefs, questions)
-# are the team's. Another session in the same repo (plugin work, a "hi") must not leak into the ticket's log.
-team_session_file() { echo "$(team_root "${1:-$PWD}")/.team-log/CURRENT.session"; }
+# Feature slug: $TEAM_FEATURE > this session's feature > worktree named after a ticket (serving-8810) -> the feature tracking it
+# > active CURRENT (touched < 12 h) > worktree name (.claude/worktrees/<name>) > stale CURRENT > "default".
+# The builders run in a worktree named after the branch (fix-8991); their events must land in the ticket's feature
+# (bug-8991-...), not in a second slug per worktree.
+team_feature() {
+  local cwd="${1:-$PWD}" cur f wt="" n
+  [ -n "${TEAM_FEATURE:-}" ] && { echo "$TEAM_FEATURE"; return; }
+  f=$(team_bound_feature "$cwd"); [ -n "$f" ] && { echo "$f"; return; }
+  case "$cwd" in */.claude/worktrees/*) wt="${cwd#*/.claude/worktrees/}"; wt="${wt%%/*}";; esac
+  n=$(grep -oE '[0-9]{3,}' <<<"$wt" | head -1 || true)
+  if [ -n "$n" ]; then f=$(team_ticket_feature "$n" "$cwd"); [ -n "$f" ] && { echo "$f"; return; }; fi
+  cur="$(team_root "$cwd")/.team-log/CURRENT"
+  if [ -s "$cur" ] && [ -n "$(find "$cur" -mmin -720 2>/dev/null)" ]; then head -1 "$cur"; return; fi
+  [ -n "$wt" ] && { echo "$wt"; return; }
+  if [ -s "$cur" ]; then head -1 "$cur"; else echo default; fi
+}
 
 # Usage of one subagent run from its transcript: "<model> <in> <cache> <out> <secs> <turns>" (in = uncached input incl. cache
 # writes, cache = cache reads). Each API message is written once per content block, so messages are de-duplicated by id.

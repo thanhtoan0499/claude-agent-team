@@ -252,4 +252,26 @@ os.environ["PATH"] = old_path
 d = fresh(); H.write_log(d, "bug-5-old", [H.ev(0, "note", "x")])
 s = H.run(tt, d, ["r"])
 ok("no session" in H.footer(s, 1), f"r on a ticket without a session: {H.footer(s, 1)!r}")
+
+# ---- time and tokens: active time skips time away, agent time pairs start/report, a resumed agent's tokens count once ----
+d = fresh()
+E = lambda t, type, **kw: {"ts": t, "type": type, "from": "agent-team:backend", "body": "", **kw}
+H.write_log(d, "bug-900-clock", [
+    E("2026-10-01T09:00:00Z", "feature_start"),
+    E("2026-10-01T09:00:00Z", "agent_started", agent_id="b1"),
+    E("2026-10-01T09:30:00Z", "worker_done", agent_id="b1", tokens_in=100, tokens_cache=0, tokens_out=0, secs=1800, turns=3),
+    E("2026-10-01T09:30:05Z", "worker_done", agent_id="b1", tokens_in=100, tokens_cache=0, tokens_out=0, secs=1800, turns=3),  # repeated report
+    E("2026-10-02T08:00:00Z", "user_reply"),                                    # overnight: time away
+    E("2026-10-02T08:00:00Z", "agent_started", agent_id="b1"),                  # resumed: its transcript keeps run 1
+    E("2026-10-02T08:10:00Z", "worker_done", agent_id="b1", tokens_in=150, tokens_cache=0, tokens_out=0, secs=82800, turns=5),
+    E("2026-10-02T08:10:00Z", "agent_started", agent_id="q1"),                  # never reported back
+])
+con = tt.open_db(os.path.join(d, "team.db")); tt.sync(con, [d]); f = tt.features(con)[0]
+ok(f["active"] == 30 * 60 + 5 + 15 * 60 + 10 * 60, f"active time caps the overnight gap at IDLE: {f['active']}")
+ok(f["asecs"] == 40 * 60, f"agent time = start -> first report, per run: {f['asecs']}")
+ok(f["tok"] == 150, f"a resumed agent's tokens count once (its largest report): {f['tok']}")
+ok(tt.status(f) == "idle", "an agent silent for more than STALE is not shown as running")
+H.write_log(d, "bug-900-clock", [E("2026-10-02T08:11:00Z", "worker_done", agent_id="q1", tokens_in=7, tokens_cache=0, tokens_out=0, secs=60, turns=1)])
+tt.sync(con, [d]); f = tt.features(con)[0]
+ok(f["asecs"] == 41 * 60 and f["tok"] == 157 and f["active"] == 30 * 60 + 5 + 15 * 60 + 11 * 60, "the clock folds in new events incrementally")
 print("PASS")

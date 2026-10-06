@@ -2,6 +2,7 @@
 # Runnable self-check: logging rules + hook + report. usage: bash tests/test_log.sh
 set -euo pipefail
 B=$(cd "$(dirname "$0")/../bin" && pwd)
+unset CLAUDE_CODE_SESSION_ID TEAM_SESSION TEAM_FEATURE   # the suite runs inside Claude Code: its session id must not bind the test features
 T=$(mktemp -d); export TEAM_HOME=$(mktemp -d); trap 'rm -rf "$T" "$TEAM_HOME"' EXIT   # never touch the real ~/.claude/agent-team
 git -C "$T" init -q; cd "$T"
 "$B/team-log" feature_start --body "demo" --feature demo
@@ -294,7 +295,7 @@ unset TEAM_HOOK_RETRIES
 rm -rf .team-log/wi-777; rm -f .team-log/CURRENT .team-log/CURRENT.session
 P() { M '{"hook_event_name":"UserPromptSubmit","cwd":"'"$T"'","session_id":"'"$1"'","prompt":"'"$2"'"}'; }
 PATH="$T/fakebin:$PATH" P s1 "/agent-team:team-lead AB#777"
-[ "$(cat .team-log/CURRENT.session)" = s1 ] || { echo "FAIL: /team-lead did not bind its session"; exit 1; }
+[ "$(cat .team-log/sessions/s1)" = wi-777 ] || { echo "FAIL: /team-lead did not bind its session"; exit 1; }
 P s2 "hi from another session"; P s1 "ok tiếp đi"
 g=.team-log/wi-777/events.ndjson
 jq -s -e 'map(select(.type=="user_reply"))|map(.body)==["/agent-team:team-lead AB#777","ok tiếp đi"]' $g >/dev/null \
@@ -332,4 +333,23 @@ pj OPEN null; TEAM_GH="$T/fakegh/gh" "$B/team-outcome" >/dev/null; TEAM_GH="$T/f
 pj MERGED '"2026-10-03T00:00:00Z"'; TEAM_GH="$T/fakegh/gh" "$B/team-outcome" | grep -q "MERGED" || { echo "FAIL: team-outcome output"; exit 1; }
 jq -s -e '[.[]|select(.type=="outcome")]|map(.verdict)==["OPEN","MERGED"] and (.[-1].body|startswith("reviews=2 changes_requested=1 comments=1 commits_after_open=1 +10/-2 files=3 days=2"))' $g >/dev/null \
   || { echo "FAIL: outcome events: $(jq -c 'select(.type=="outcome")|[.verdict,.body]' $g)"; exit 1; }
+# ---- v0.1.24: two sessions run two tickets in one repo at once; each one's events stay in its own ticket ----
+mkdir -p .claude/worktrees/serving-901
+A() { M '{"hook_event_name":"'"$1"'","session_id":"sa","cwd":"'"$T/.claude/worktrees/serving-901"'","agent_type":"agent-team:qa","agent_id":"'"$2"'","last_assistant_message":"DONE '"$2"'"}'; }
+PATH="$T/fakebin:$PATH" P sa "/agent-team:team-lead AB#901"
+A SubagentStart qa1
+PATH="$T/fakebin:$PATH" P sb "/agent-team:team-lead AB#902"                  # session B moves CURRENT to its ticket
+A SubagentStop qa1
+( cd .claude/worktrees/serving-901 && CLAUDE_CODE_SESSION_ID=sa "$B/team-log" note --body "master A note" )   # A's master, from Bash
+P sb "b prompt"; P sa "a prompt"
+"$B/team-log" feature_end --feature wi-902                                    # B finishes: CURRENT gone
+A SubagentStart qa2; A SubagentStop qa2
+( cd .claude/worktrees/serving-901 && "$B/team-log" note --body "sessionless" )   # no session at all: the worktree's ticket number
+a=.team-log/wi-901/events.ndjson; b=.team-log/wi-902/events.ndjson
+jq -s -e '[.[]|select(.agent_id=="qa1" or .agent_id=="qa2")]|length==4' $a >/dev/null \
+  && jq -s -e '[.[]|.body]|index("master A note") and index("a prompt") and index("sessionless")' $a >/dev/null \
+  && jq -s -e '[.[]|select(.agent_id=="qa1" or .agent_id=="qa2" or .body=="master A note" or .body=="a prompt")]|length==0' $b >/dev/null \
+  && jq -s -e '[.[]|.body]|index("b prompt")' $b >/dev/null && [ ! -e .team-log/serving-901 ] \
+  || { echo "FAIL: parallel sessions: A=$(jq -c '[.type,.agent_id,.body]' $a | tr '\n' ' ') B=$(jq -c '[.type,.agent_id,.body]' $b | tr '\n' ' ') dirs=$(ls .team-log)"; exit 1; }
+[ "$(cat .team-log/sessions/sa)" = wi-901 ] && [ ! -e .team-log/sessions/sb ] || { echo "FAIL: bindings after feature_end"; exit 1; }
 echo PASS
