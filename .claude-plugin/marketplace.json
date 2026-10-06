@@ -6,7 +6,7 @@
     {
       "name": "agent-team",
       "description": "Master-led AI dev team with a structured question/decision log.",
-      "version": "0.1.24",
+      "version": "0.1.25",
       "source": "./",
       "author": { "name": "thanhtoan0499" }
     }

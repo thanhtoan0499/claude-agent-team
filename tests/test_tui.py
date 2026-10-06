@@ -3,6 +3,7 @@
 Drives the real ui() loop with a fake screen (tests/tui_harness.py)."""
 
 import curses
+import json
 import os
 import re
 import sys
@@ -274,4 +275,33 @@ ok(tt.status(f) == "idle", "an agent silent for more than STALE is not shown as 
 H.write_log(d, "bug-900-clock", [E("2026-10-02T08:11:00Z", "worker_done", agent_id="q1", tokens_in=7, tokens_cache=0, tokens_out=0, secs=60, turns=1)])
 tt.sync(con, [d]); f = tt.features(con)[0]
 ok(f["asecs"] == 41 * 60 and f["tok"] == 157 and f["active"] == 30 * 60 + 5 + 15 * 60 + 11 * 60, "the clock folds in new events incrementally")
+
+# ---- a log rewritten (not appended) or deleted: the index follows the disk, in the open TUI and in a new process ----
+d = fresh(); db = os.path.join(d, "team.db")
+H.write_log(d, "wi-1-a", [H.ev(i, "note", f"a{i}") for i in range(3)])
+H.write_log(d, "wi-2-b", [H.ev(i, "note", f"b{i}") for i in range(2)])
+H.write_log(d, "stray-1", [H.ev(0, "note", "stray")])
+con = tt.open_db(db); tt.sync(con, [d])
+bodies = lambda feat: [r[0] for r in con.execute("select body from events where feature=? order by line", (feat,))]
+# a repair: events moved INTO the middle of wi-1-a, file replaced (new inode), longer than before, same last line
+p = os.path.join(d, "wi-1-a", "events.ndjson")
+with open(p + ".new", "w") as fh:
+    fh.writelines(json.dumps(H.ev(i, "note", b)) + "\n" for i, b in enumerate(["a0", "moved", "stray", "a1", "a2"]))
+os.replace(p + ".new", p); import shutil; shutil.rmtree(os.path.join(d, "stray-1"))
+tt.sync(con, [d])
+ok(bodies("wi-1-a") == ["a0", "moved", "stray", "a1", "a2"], f"a replaced log is indexed again from the top: {bodies('wi-1-a')}")
+ok(bodies("stray-1") == [] and "stray-1" not in [f["feature"] for f in tt.features(con)], "a deleted ticket leaves the index")
+# in place, same inode, longer: the last consumed line moved
+p = os.path.join(d, "wi-2-b", "events.ndjson")
+with open(p, "r+") as fh: fh.seek(0); fh.write(json.dumps(H.ev(0, "note", "b0-edited-and-longer")) + "\n" + json.dumps(H.ev(1, "note", "b1")) + "\n")
+tt.sync(con, [d]); ok(bodies("wi-2-b") == ["b0-edited-and-longer", "b1"], f"an in-place edit is indexed again: {bodies('wi-2-b')}")
+# a new process (tt reopened) on an index made before the log was replaced
+con.close(); tt._seen.clear(); tt._visited.clear()
+p = os.path.join(d, "wi-1-a", "events.ndjson")
+with open(p + ".new", "w") as fh: fh.writelines(json.dumps(H.ev(i, "note", b)) + "\n" for i, b in enumerate(["x0", "x1", "x2", "x3", "x4", "x5"]))
+os.replace(p + ".new", p); shutil.rmtree(os.path.join(d, "wi-2-b"))
+con = tt.open_db(db); tt.sync(con, [d])
+ok(bodies("wi-1-a") == ["x0", "x1", "x2", "x3", "x4", "x5"], f"reopened: a log replaced meanwhile is indexed again: {bodies('wi-1-a')}")
+ok(bodies("wi-2-b") == [], "reopened: a ticket deleted meanwhile leaves the index")
+f = tt.features(con)[0]; ok(f["n"] == 6, "the clock and the list agree with the re-read log")
 print("PASS")

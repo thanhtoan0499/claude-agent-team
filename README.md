@@ -126,7 +126,7 @@ bash tests/test_log.sh        # self-check
 `~/.claude/agent-team/repos`, and `team-tui` keeps a derived SQLite index of all of them in `~/.claude/agent-team/team.db`, so you can open it
 from any directory and see every repo's tickets. The repo you run it in is added automatically; `team-tui --add <repo>` adds one by hand.
 `team-tui --query "<SQL>"` runs read-only SQL over it (`team-retro` uses this to compare tickets and plugin versions; every event carries
-`plugin_version`). Delete `team.db` any time: it is rebuilt from the NDJSON files. `TEAM_HOME` moves the folder; `TEAM_LOG_DIR=<dir>` restricts
+`plugin_version`). Delete `team.db` any time: it is rebuilt from the NDJSON files. A log rewritten in place (a repair, `sed -i`) is read again from the top and a deleted ticket folder leaves the index on the next tick (0.1.25), so a repair needs no manual delete. `TEAM_HOME` moves the folder; `TEAM_LOG_DIR=<dir>` restricts
 the TUI to one log folder with its own `team.db` inside. Logs hold ticket text, agent reports and the commands run, so this folder collects
 every project's in one place under your home.
 

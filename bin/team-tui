@@ -3,7 +3,8 @@
 Each repo's <repo>/.team-log/<ticket>/events.ndjson stays the source of truth (the hooks only ever append there).
 ~/.claude/agent-team/team.db (SQLite; TEAM_HOME overrides the folder) is a derived index over all of them: repos are listed
 in ~/.claude/agent-team/repos by team-log, and the repo you run team-tui in is added automatically. Delete team.db any time:
-it is rebuilt from the NDJSON files (rows of a repo that was deleted from disk survive in it until you delete it).
+it is rebuilt from the NDJSON files. A ticket whose log is deleted or rewritten (a repair) is dropped or re-read on the next
+tick; the rows of a whole repo that is gone from disk survive until you delete team.db.
 usage: team-tui            interactive (j/k move, g/G first/last, enter open, o expand, f Q&A-only, esc back, q quit)
        team-tui --dump [ticket|repo/ticket]   plain text, no curses (scripts/tests)
        team-tui --add PATH     register a repo (its .team-log) or a .team-log folder
@@ -72,9 +73,12 @@ def open_db(path):
         tokens_in int, tokens_cache int, tokens_out int, secs int, turns int, session text, cwd text,
         primary key(src, feature, line))""")
     con.execute("create index if not exists ev_type on events(type)")
+    # inode of each indexed log: a log rewritten in place of the old one (a repair script, sed -i, an editor) is a new file
+    con.execute("create table if not exists logs(src text, feature text, ino int, primary key(src, feature))")
     return con
 
-_seen = {}  # log path -> (lines consumed, byte offset): where this process stopped reading each append-only log
+_seen = {}  # log path -> (lines consumed, byte offset, inode, last consumed line): where this process stopped reading each log
+_visited = set()  # log folders already pruned against the events table in this process
 
 def _skip(f, n):
     """-> (lines, offset) after the first n complete lines of f; fewer lines than n means the log is not the one the DB indexed."""
@@ -91,24 +95,44 @@ def reindex(con, src, feat):
     con.execute("delete from events where src=? and feature=?", (src, feat))
     if isinstance(con, Conn): con.clock.drop((src, feat))
 
+def _tail(f, off, last):
+    """True when the bytes just before off are still the last line this process consumed (an in-place edit moves them)."""
+    if not last: return True
+    with open(f, "rb") as fh: fh.seek(off - len(last)); return fh.read(len(last)) == last
+
+def prune(con, src, have):
+    """Drop the tickets of src whose log is gone from disk (folder deleted, merged into another ticket). A missing src
+    folder prunes nothing: a repo that is only unmounted or moved keeps its rows."""
+    if not os.path.isdir(src): return
+    q = "select distinct feature from events where src=?" if src not in _visited else "select feature from logs where src=?"
+    _visited.add(src)
+    for (feat,) in con.execute(q, (src,)).fetchall():
+        if feat in have: continue
+        reindex(con, src, feat); con.execute("delete from logs where src=? and feature=?", (src, feat))
+        _seen.pop(os.path.join(src, feat, "events.ndjson"), None)
+
 def sync(con, srcs):
     """Ingest events appended since the last call to every log folder in srcs, reading only the new bytes (a keypress
-    must not re-read the whole log). -> number of new events."""
+    must not re-read the whole log). A log that is not the one indexed (new inode, shorter, or its last consumed line
+    changed) is indexed again from the top; a ticket whose log is gone leaves the index. -> number of new events."""
     new = 0
     for src in srcs:
-        repo = repo_name(src)
+        repo = repo_name(src); have = set()
         for f in glob.glob(os.path.join(src, "*", "events.ndjson")):
-            feat = os.path.basename(os.path.dirname(f))
-            try: size = os.path.getsize(f)
+            feat = os.path.basename(os.path.dirname(f)); have.add(feat)
+            try: st = os.stat(f)
             except OSError: continue
+            size, ino = st.st_size, st.st_ino
             if f not in _seen:  # first look in this process: resume after what the DB already holds
                 done = con.execute("select coalesce(max(line),0) from events where src=? and feature=?", (src, feat)).fetchone()[0]
+                known = con.execute("select ino from logs where src=? and feature=?", (src, feat)).fetchone()
                 c, off = _skip(f, done)
-                if c < done: reindex(con, src, feat); c = off = 0  # log replaced
-                _seen[f] = (c, off)
-            n, off = _seen[f]
-            if size < off: reindex(con, src, feat); n = off = 0  # log truncated
-            if size == off: _seen[f] = (n, off); continue
+                if c < done or (known and known[0] != ino): reindex(con, src, feat); c = off = 0  # log replaced
+                _seen[f] = (c, off, ino, b"")
+            n, off, was, last = _seen[f]
+            if ino != was or size < off or not _tail(f, off, last): reindex(con, src, feat); n = off = 0; last = b""  # rewritten
+            if size == off: _seen[f] = (n, off, ino, last); continue
+            con.execute("insert or replace into logs values(?,?,?)", (src, feat, ino))
             with open(f, "rb") as fh:
                 fh.seek(off)
                 for raw in fh:
@@ -116,7 +140,7 @@ def sync(con, srcs):
                     try: e = json.loads(raw)
                     except ValueError:
                         if not whole: break  # half-written tail: pick it up once the writer finishes it
-                        n += 1; off += len(raw); continue  # garbled line: skip, keep numbering
+                        n += 1; off += len(raw); last = raw; continue  # garbled line: skip, keep numbering
                     new += con.execute("insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (src, repo, feat, n + 1, e.get("ts"), e.get("type"), e.get("from"), e.get("to"), e.get("task"), e.get("body"),
                          e.get("rationale"), " | ".join(e.get("options", [])), e.get("agent_id"),
@@ -124,8 +148,9 @@ def sync(con, srcs):
                          e.get("decided_by"), e.get("verdict"), e.get("codes"), e.get("plugin_version"), e.get("model"),
                          e.get("tokens_in"), e.get("tokens_cache"), e.get("tokens_out"), e.get("secs"), e.get("turns"), e.get("session"), e.get("cwd"))).rowcount
                     if not whole: break  # complete JSON but no newline yet: keep it, re-read (and ignore the duplicate) later
-                    n += 1; off += len(raw)
-            _seen[f] = (n, off)
+                    n += 1; off += len(raw); last = raw
+            _seen[f] = (n, off, ino, last)
+        prune(con, src, have)
     con.commit()
     return new
 
