@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# PreToolUse guard: an agent-team:* subagent in a repo with a `.codegraph/` index must make codegraph_explore its first code
+# search. Its first grep/rg/find/ack/ag (Bash) or Grep call, before any codegraph call, is denied ONCE with a pointer to
+# codegraph; after that (or after any codegraph call) nothing is blocked, so a genuine string search still works.
+# Reading files (Read, sed -n, cat) is never blocked: briefs name plan.md / baseline.md / rule files to read first.
+# State: one marker per agent run in $TMPDIR/agent-team-cg/<agent_id>. Never fails the tool call on its own error.
+in=$(cat)
+case "$in" in *agent-team:*) ;; *) exit 0 ;; esac
+J() { jq -r "$1" <<<"$in" 2>/dev/null; }
+agent=$(J '.agent_type // empty'); id=$(J '.agent_id // empty')
+case "$agent" in agent-team:*) ;; *) exit 0 ;; esac
+[ -n "$id" ] || exit 0
+mark="${TMPDIR:-/tmp}/agent-team-cg/$id"
+[ -e "$mark" ] && exit 0
+tool=$(J '.tool_name // empty')
+case "$tool" in
+  mcp__codegraph__*) mkdir -p "${mark%/*}" && : > "$mark"; exit 0 ;;
+  Grep) ;;
+  Bash)
+    cmd=$(J '.tool_input.command // empty')
+    grep -qE '(^|[;&|(`$]|&&|\|\|)[[:space:]]*(sudo[[:space:]]+)?(grep|egrep|fgrep|rg|ag|ack|find|git[[:space:]]+grep)([[:space:]]|$)' <<<"$cmd" || exit 0 ;;
+  *) exit 0 ;;
+esac
+# Only where an index exists: walk up from the agent's cwd.
+d=$(J '.cwd // empty'); [ -n "$d" ] || d=$PWD
+while [ "$d" != / ] && [ ! -d "$d/.codegraph" ]; do d=$(dirname "$d"); done
+[ -d "$d/.codegraph" ] || exit 0
+mkdir -p "${mark%/*}" && : > "$mark"   # block once only
+reason="This repo has a CodeGraph index ($d/.codegraph). Your first code search must be mcp__codegraph__codegraph_explore (projectPath: $d): pass a question or the symbol/file names you were about to grep; it returns the verbatim source plus callers in one call. Use grep/find afterwards only for plain strings, log keys or non-code files. This reminder is shown once; the next search is not blocked."
+jq -nc --arg r "$reason" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'

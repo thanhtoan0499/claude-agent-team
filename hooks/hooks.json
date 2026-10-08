@@ -1,27 +1,93 @@
 {
-  "description": "Log everything the team does without relying on the LLM: subagent lifecycle + full final reports + tool calls/errors, and (while a feature is active) the master's briefs, its questions to the user, the user's answers, and the master's policy card after a compaction",
+  "description": "Log everything the team does without relying on the LLM: subagent lifecycle + full final reports + tool calls/errors, and (while a feature is active) the master's briefs, its questions to the user, the user's answers, and the master's policy card after a compaction; and a guard that makes codegraph_explore an agent's first code search in a repo with a .codegraph/ index",
   "hooks": {
     "SubagentStart": [
-      { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "SubagentStop": [
-      { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "PreToolUse": [
-      { "matcher": "Agent|Task|SendMessage|AskUserQuestion",
-        "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+      {
+        "matcher": "Agent|Task|SendMessage|AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Grep|mcp__codegraph__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-codegraph-guard",
+            "timeout": 5
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "PostToolUseFailure": [
-      { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook", "timeout": 10 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-hook",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

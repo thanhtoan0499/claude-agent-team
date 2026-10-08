@@ -9,6 +9,8 @@ OBJECTIVE:      one sentence, the outcome (not the steps)
 READ FIRST:     paths, not summaries — .team-log/<feature>/plan.md, the contract section, CLAUDE.md rules that apply, files:lines,
                 and the repo's own knowledge for this role if it exists: .claude/agents/<role>.md (e.g. backend-dev, frontend-dev,
                 reviewer) and the .claude/rules/*.md files the diff touches. The plugin's role skills carry discipline, the repo carries domain.
+CODE NAV:       if the repo has `.codegraph/`: "your first code lookup is codegraph_explore, projectPath=<worktree or repo root>";
+                name the symbols/files to start from. grep/find only for plain strings and non-code files.
 TERRITORY:      the files you may edit (disjoint from every other agent running now)
 NOT:            everything else — other agents' files, the main checkout, running dev servers/ports, git push/commit, ADO writes,
                 new dependencies, drive-by refactors

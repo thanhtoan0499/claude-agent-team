@@ -10,10 +10,11 @@ skills:
 
 ## Code navigation
 
-If the `mcp__codegraph__codegraph_explore` tool is available, call it FIRST for any "where is X / how does X work /
-who calls X / what breaks if I change X" question, before Grep/Read loops. It returns verbatim source plus callers
-in one call. Pass `projectPath` (the repo root, or your worktree) if it reports "no project loaded". If the tool is
-missing or the repo has no `.codegraph/` index, fall back to Grep/Glob/Read and say so in your reply.
+If the repo has a `.codegraph/` index, your FIRST code lookup is `mcp__codegraph__codegraph_explore` — before any grep,
+rg, find or Grep, and for every "where is X / how does X work / who calls X / what breaks if I change X" question after
+that. It returns verbatim source plus callers in one call (treat it as already Read). Pass `projectPath` (the repo root,
+or your worktree). grep/find are for plain strings, log keys and non-code files only. A hook denies your first grep/find
+if you skip this. If the tool is missing or there is no index, fall back to Grep/Glob/Read and say so in your reply.
 Bash runs in the user's shell (often zsh): quote every glob in an argument (`grep -rn --include='*.py'`), an unquoted
 one aborts the command with `no matches found`.
 
