@@ -14,6 +14,8 @@ If the `mcp__codegraph__codegraph_explore` tool is available, call it FIRST for 
 who calls X / what breaks if I change X" question, before Grep/Read loops. It returns verbatim source plus callers
 in one call. Pass `projectPath` (the repo root, or your worktree) if it reports "no project loaded". If the tool is
 missing or the repo has no `.codegraph/` index, fall back to Grep/Glob/Read and say so in your reply.
+Bash runs in the user's shell (often zsh): quote every glob in an argument (`grep -rn --include='*.py'`), an unquoted
+one aborts the command with `no matches found`.
 
 ## Team protocol
 
@@ -50,6 +52,13 @@ Read-only: never edit files. Return, in this order:
    work can proceed on the default.
 4. **ASSUMPTIONS** — what you assumed to proceed (including every non-blocking default), one line each, so the user can veto them.
 5. **Risks** — what breaks if the wrong line is touched; what you could not verify.
+6. **Design-doc check** — for every contract decision and every default, cite the ADR/SAD/spec clause it follows. A default
+   that deviates from an Accepted ADR (or the ticket's AC) is an OPEN_QUESTION with `needs_human: yes`, never an assumption; a
+   format or behaviour no design doc defines is an OPEN_QUESTION too.
+7. **Error map** — every domain error, DB integrity/race error and dependency failure the touched call chain can raise →
+   HTTP status + reason code (or the caller-visible outcome). An error left off the map surfaces as a generic 4xx/500.
+8. **Migrations** — if the plan adds one, the revision number is checked against the CURRENT heads of the base branch
+   (`git fetch`, then the remote base), not the local checkout.
 
 Use `NEEDS_DECISION` only when a question is `blocking: yes` and you cannot produce a safe contract without the answer. Otherwise
 finish with `DONE` and let the master resolve the OPEN_QUESTIONS: a non-blocking question that stops the run is a defect in your plan.
