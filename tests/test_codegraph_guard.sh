@@ -19,5 +19,11 @@ out=$(call agent-team:qa a3 "$T/idx" Grep "Foo"); denied "$out" || fail "first G
 out=$(call agent-team:qa a4 "$T/noidx" Bash "find . -name x"); denied "$out" && fail "denied in a repo without index"
 out=$(call "" a5 "$T/idx" Bash "grep x y"); denied "$out" && fail "non-team agent denied"
 out=$(call agent-team:reviewer a6 "$T/idx" Bash "git log --grep=fix -5"); denied "$out" && fail "git log --grep denied"
-out=$(call agent-team:reviewer a7 "$T/idx" Bash "ls | grep foo"); denied "$out" || fail "piped grep not denied"
+out=$(call agent-team:reviewer a7 "$T/idx" Bash "uv run pytest -q tests | grep FAILED"); denied "$out" && fail "grep filtering piped output denied"
+out=$(call agent-team:reviewer a7 "$T/idx" Bash "find src -name '*.py' | grep foo"); denied "$out" || fail "find piped to grep not denied"
+out=$(call agent-team:qa a8 "$T/idx" Bash "grep -n FAILED /tmp/run.log"); denied "$out" && fail "grep on a log file denied"
+out=$(call agent-team:qa a8 "$T/idx" Bash "grep -c tool_call .team-log/x/events.ndjson docs/notes.md"); denied "$out" && fail "grep on .team-log/md denied"
+out=$(call agent-team:qa a8 "$T/idx" Bash "grep -rn 'Foo' src/app.py notes.md"); denied "$out" || fail "grep naming a code file not denied"
+out=$(call agent-team:qa a9 "$T/idx" Bash "grep -rn Foo"); denied "$out" || fail "grep with no path not denied"
+out=$(call agent-team:backend b1 "$T/idx" Bash "a || grep -rn Foo src"); denied "$out" || fail "grep after || not denied"
 echo PASS

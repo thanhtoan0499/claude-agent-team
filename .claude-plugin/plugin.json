@@ -1,6 +1,6 @@
 {
   "name": "agent-team",
   "description": "Master-led AI dev team for Claude Code: planner/backend/frontend/designer/qa/reviewer agents, a NEEDS_DECISION question protocol, and a structured per-feature NDJSON log of every task, question and decision. Pairs with parallel-worktree-run.",
-  "version": "0.1.27",
+  "version": "0.1.28",
   "author": { "name": "thanhtoan0499" }
 }

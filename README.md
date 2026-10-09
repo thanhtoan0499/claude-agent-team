@@ -9,7 +9,7 @@ with a structured log of every task, question and decision. Pairs with
 /plugin marketplace add thanhtoan0499/claude-agent-team
 /plugin install agent-team@agent-team-marketplace
 ```
-Requires `jq` and `git`. Optional: the `codegraph` MCP server; agents then use `codegraph_explore` for code questions and fall back to grep without it. In a repo with a `.codegraph/` index, `bin/team-codegraph-guard` (PreToolUse) denies an agent's first grep/find before any codegraph call, once (`tests/test_codegraph_guard.sh`). Put `bin/` on PATH (or call `${CLAUDE_PLUGIN_ROOT}/bin/team-log`).
+Requires `jq` and `git`. Optional: the `codegraph` MCP server; agents then use `codegraph_explore` for code questions and fall back to grep without it. In a repo with a `.codegraph/` index, `bin/team-codegraph-guard` (PreToolUse) denies an agent's first grep/find before any codegraph call, once (`tests/test_codegraph_guard.sh`); a grep filtering piped output or searching only log/text files is let through. `bin/team-budget-guard` (PreToolUse) reminds an agent run once, at 60 tool calls (`TEAM_TOOL_BUDGET`), to finish its step and report `remaining:` (`tests/test_budget_guard.sh`). Put `bin/` on PATH (or call `${CLAUDE_PLUGIN_ROOT}/bin/team-log`).
 
 ## Use
 Tell Claude: "dùng team làm feature X" → skill `team-lead` (you = master).
@@ -122,6 +122,7 @@ bin/team-report [feature]     # timeline: who asked what, what master decided an
 /agent-team:team-retro        # find repeated questions / reversed decisions → improve agent prompts
 bash tests/test_log.sh        # self-check
 bash tests/test_codegraph_guard.sh
+bash tests/test_budget_guard.sh
 ```
 **Shared index.** Hooks still append to `<repo>/.team-log/<ticket>/events.ndjson` (the source of truth). `team-log` also lists the repo in
 `~/.claude/agent-team/repos`, and `team-tui` keeps a derived SQLite index of all of them in `~/.claude/agent-team/team.db`, so you can open it

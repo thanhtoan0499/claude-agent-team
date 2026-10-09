@@ -2,7 +2,8 @@
 # PreToolUse guard: an agent-team:* subagent in a repo with a `.codegraph/` index must make codegraph_explore its first code
 # search. Its first grep/rg/find/ack/ag (Bash) or Grep call, before any codegraph call, is denied ONCE with a pointer to
 # codegraph; after that (or after any codegraph call) nothing is blocked, so a genuine string search still works.
-# Reading files (Read, sed -n, cat) is never blocked: briefs name plan.md / baseline.md / rule files to read first.
+# Reading files (Read, sed -n, cat) is never blocked: briefs name plan.md / baseline.md / rule files to read first. Neither is
+# a grep filtering piped output, nor a search whose every path is a log/text/data file (.log .txt .md .json, .team-log, /tmp).
 # State: one marker per agent run in $TMPDIR/agent-team-cg/<agent_id>. Never fails the tool call on its own error.
 in=$(cat)
 case "$in" in *agent-team:*) ;; *) exit 0 ;; esac
@@ -18,7 +19,23 @@ case "$tool" in
   Grep) ;;
   Bash)
     cmd=$(J '.tool_input.command // empty')
-    grep -qE '(^|[;&|(`$]|&&|\|\|)[[:space:]]*(sudo[[:space:]]+)?(grep|egrep|fgrep|rg|ag|ack|find|git[[:space:]]+grep)([[:space:]]|$)' <<<"$cmd" || exit 0 ;;
+    # A grep/rg after a single pipe filters another command's output (`pytest ... | grep FAILED`): not a code search.
+    cmd=$(sed -E 's/(^|[^|])\|[[:space:]]*(e|f)?grep([[:space:]][^;&|]*)?/\1/g; s/(^|[^|])\|[[:space:]]*rg([[:space:]][^;&|]*)?/\1/g' <<<"$cmd")
+    grep -qE '(^|[;&|(`$]|&&|\|\|)[[:space:]]*(sudo[[:space:]]+)?(grep|egrep|fgrep|rg|ag|ack|find|git[[:space:]]+grep)([[:space:]]|$)' <<<"$cmd" || exit 0
+    # Every path it names is a log/text/data file (qa reading test output, .team-log): not a code search either.
+    set -f; read -ra words <<<"$cmd"; set +f
+    paths=0 code=0
+    for w in "${words[@]}"; do
+      w=${w//[\'\"]/}
+      case "$w" in -*|'') continue ;; esac
+      case "$w" in */*|*.[A-Za-z]*) ;; *) continue ;; esac
+      paths=$((paths + 1))
+      case "$w" in
+        *.team-log*|/tmp/*|*.log|*.txt|*.md|*.json|*.ndjson|*.out|*.csv|*.xml|*.html) ;;
+        *) code=1 ;;
+      esac
+    done
+    [ "$paths" -gt 0 ] && [ "$code" -eq 0 ] && exit 0 ;;
   *) exit 0 ;;
 esac
 # Only where an index exists: walk up from the agent's cwd.

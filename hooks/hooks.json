@@ -1,5 +1,5 @@
 {
-  "description": "Log everything the team does without relying on the LLM: subagent lifecycle + full final reports + tool calls/errors, and (while a feature is active) the master's briefs, its questions to the user, the user's answers, and the master's policy card after a compaction; and a guard that makes codegraph_explore an agent's first code search in a repo with a .codegraph/ index",
+  "description": "Log everything the team does without relying on the LLM: subagent lifecycle + full final reports + tool calls/errors, and (while a feature is active) the master's briefs, its questions to the user, the user's answers, and the master's policy card after a compaction; and a guard that makes codegraph_explore an agent's first code search in a repo with a .codegraph/ index; and a budget guard that reminds an agent-team run once, at 60 tool calls, to finish its step and report what remains",
   "hooks": {
     "SubagentStart": [
       {
@@ -62,6 +62,15 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-codegraph-guard",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/team-budget-guard",
             "timeout": 5
           }
         ]

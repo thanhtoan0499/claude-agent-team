@@ -46,6 +46,9 @@ otherwise note it. Either way it is reported once, at the end.
 Order: designer (only if UI states are new) → backend and frontend in parallel on the frozen contract.
 Every dispatch follows the delegation brief (objective, read-first paths, territory, NOT-list, acceptance, evidence, negative-OK,
 autonomy, budget). Parallel builders MUST NOT touch the same files; if territories overlap, serialize.
+**One or two plan tasks per builder run.** A plan with T1–T5 is several runs in sequence, each starting from `plan.md` and the
+previous report, not one long run: every turn re-reads the whole context, so a 140-turn run costs far more than two 70-turn
+runs (retro: the two longest runs were 18% of all tokens). A run that reports `remaining:` gets a fresh run for the rest.
 
 ### Live stacks / worktree (optional)
 Use the `parallel-worktree-run` skill: `parallel-task.sh start <slug> <native|docker>`, dispatch the builder with that worktree as
@@ -61,7 +64,8 @@ and tell the user what is unclear.
 
 ## 4. Verify
 `qa` (against a live stack URL if one exists), then `reviewer` on the full diff. If the repo requires a PR doc (e.g. `pr-doc`),
-write it BEFORE the reviewer runs: the reviewer checks its claims against the AC and the repo's length cap. Both tag every red check `NEW` or `BASELINE`
+write it BEFORE the reviewer runs: the reviewer checks its claims against the AC and the repo's length cap. After every fix round,
+update the doc where the fix changed what it claims; the final reviewer pass re-checks it. Both tag every red check `NEW` or `BASELINE`
 against `baseline.md`; only `NEW` enters the fix loop. Do not trust replies: read the evidence (command, exit
 code, pass/fail counts) and check builders stayed inside their territory (`references/delegation-brief.md`).
 Each finding: `team-log review_finding --from reviewer --body "<sev | file:line | issue>"`.
@@ -105,3 +109,5 @@ backfill it with `team-log` prefixed `[backfilled]` and note it: a missing autom
 - Never describe your own or an agent's "accepted" as the user's approval; `decided_by` must be true.
 - Subagents' final messages are the source of truth for the log; don't paraphrase their questions.
 - Don't implement code yourself except to unblock a mechanical conflict.
+- Never pass `model` when dispatching: the agent file's model is the one triage chose. Sole exception: the R2 diagnosis on opus
+  (`references/escalation-ladder.md`).
