@@ -1,4 +1,4 @@
-# agent-team
+# agent-team — reference
 
 Master-led AI dev team for Claude Code. One feature → planner, designer, backend, frontend, qa, reviewer,
 with a structured log of every task, question and decision. Pairs with
