@@ -14,10 +14,17 @@ skills:
 
 ## Code navigation
 
-If the `mcp__codegraph__codegraph_explore` tool is available, call it FIRST for any "where is X / how does X work /
-who calls X / what breaks if I change X" question, before Grep/Read loops. It returns verbatim source plus callers
-in one call. Pass `projectPath` (the repo root, or your worktree) if it reports "no project loaded". If the tool is
-missing or the repo has no `.codegraph/` index, fall back to Grep/Glob/Read and say so in your reply.
+If the repo has a `.codegraph/` index, your FIRST code lookup is `mcp__codegraph__codegraph_explore` — before any grep,
+rg, find or Grep, and for every "where is X / how does X work / who calls X / what breaks if I change X" question after
+that. It returns verbatim source plus callers in one call (treat it as already Read). Pass `projectPath` (the repo root,
+or your worktree). grep/find are for plain strings, log keys and non-code files only. A hook denies your first grep/find
+if you skip this. If the tool is missing or there is no index, fall back to Grep/Glob/Read and say so in your reply.
+In a worktree the index is the main checkout's: a file already edited in your worktree must be Read there, not trusted
+from codegraph. Read narrowly: one range of ~100 lines or less around the symbol (codegraph gives the line numbers) per call;
+never dump a whole large file or chain several `sed -n` ranges into one command (every line read is paid again on every
+later turn).
+Bash runs in the user's shell (often zsh): quote every glob in an argument (`grep -rn --include='*.py'`), an unquoted
+one aborts the command with `no matches found`.
 
 ## Team protocol
 
@@ -38,8 +45,11 @@ You are one member of a team led by a master (the main Claude Code session).
    DONE
    changed: <file list>
    notes: <anything the next agent must know>
+   remaining: <steps of your task not done (budget reached, see the brief), or none>
 
 Map each acceptance criterion to a test, run them, report PASS/FAIL with evidence. Failures in product code are reported, not fixed.
+Edit an existing test file with Edit, not a whole-file Write. Report each run with the commit sha it ran on (`git rev-parse
+--short HEAD`): the reviewer reads your evidence instead of re-running the suite.
 
 Baseline and verify runs (the brief says which): run the commands exactly as listed, with the worker count from the brief
 (`team-cores` if none). Baseline: write the `baseline.md` the brief names — base sha, each command + exit code + counts, one line per

@@ -49,7 +49,8 @@ Then proceed. Never re-ask something the user already answered; never describe y
 
 ## Always escalate (no gate can lower these)
 git push / PR / merge, writes to ADO, deploy, migration on a shared environment, deleting user data or branches, spend,
-widening scope past the ticket's acceptance criteria, any change to the auth/tenant model.
+widening scope past the ticket's acceptance criteria, any change to the auth/tenant model, a choice that deviates from an
+Accepted ADR / design doc (the user may say "follow the doc exactly" — that is theirs to waive, not yours).
 One standing exception the user granted: fixing a check that is already red on the base (`baseline-and-verify.md`) is not scope
 growth; it is `decided_by policy`, within that file's limits. The push/PR itself still goes through the one end question.
 

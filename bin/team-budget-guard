@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# PreToolUse guard: an agent-team:* subagent run that reaches TEAM_TOOL_BUDGET tool calls (default 60) is denied ONCE with a
+# reminder to finish its current step and report DONE with `remaining:`. Every turn re-reads the whole context, so one very
+# long run costs far more than two shorter ones (retro: the two longest runs, 130-148 turns, were 18% of all tokens).
+# After the reminder nothing is blocked. State: a call counter per agent run in $TMPDIR/agent-team-budget/<agent_id>.
+in=$(cat)
+case "$in" in *agent-team:*) ;; *) exit 0 ;; esac
+J() { jq -r "$1" <<<"$in" 2>/dev/null; }
+agent=$(J '.agent_type // empty'); id=$(J '.agent_id // empty')
+case "$agent" in agent-team:*) ;; *) exit 0 ;; esac
+[ -n "$id" ] || exit 0
+max=${TEAM_TOOL_BUDGET:-60}
+f="${TMPDIR:-/tmp}/agent-team-budget/$id"
+mkdir -p "${f%/*}" 2>/dev/null || exit 0
+n=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$f"
+[ "$n" -eq "$max" ] || exit 0
+reason="This run has made $max tool calls; every further turn re-reads your whole context, which is the team's biggest token cost. Finish the step you are on (a few more calls are fine), then end with DONE and list what is left under 'remaining:'. The master continues it in a fresh run with a short brief. This reminder is shown once; the next call is not blocked."
+jq -nc --arg r "$reason" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'

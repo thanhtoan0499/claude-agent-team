@@ -33,8 +33,9 @@ Dispatch `agent-team:planner` using the brief template (`references/delegation-b
 `.team-log/<feature>/plan.md`: that file, not your memory, is the plan.
 The planner returns tasks, a frozen contract, and `OPEN_QUESTIONS` (each with recommendation, default, blocking) plus `ASSUMPTIONS`.
 1. Run **every** open question through `team-gate` (`references/decision-policy.md`). DECIDE/ASSUME you resolve; only ESCALATE goes up.
-2. Present the plan once, with **Master decided**, **Assumptions**, **Workspace**, then ONE `AskUserQuestion` (plan approval + the
-   ESCALATE items, recommended option first). Approval = the user's answer, nothing else.
+2. Present the plan once, with **Master decided**, **Assumptions**, **Workspace** (worktree/branch AND the PR plan: new PR or an
+   existing one, base branch — default base = the main branch, stack on another feature branch only if the user says so), then
+   ONE `AskUserQuestion` (plan approval + the ESCALATE items, recommended option first). Approval = the user's answer, nothing else.
 3. Log: `team-log decision --from master --decided-by user --body "plan approved" --rationale "<their words / why this split>"`.
 
 ## 2. Build
@@ -45,6 +46,9 @@ otherwise note it. Either way it is reported once, at the end.
 Order: designer (only if UI states are new) → backend and frontend in parallel on the frozen contract.
 Every dispatch follows the delegation brief (objective, read-first paths, territory, NOT-list, acceptance, evidence, negative-OK,
 autonomy, budget). Parallel builders MUST NOT touch the same files; if territories overlap, serialize.
+**One or two plan tasks per builder run.** A plan with T1–T5 is several runs in sequence, each starting from `plan.md` and the
+previous report, not one long run: every turn re-reads the whole context, so a 140-turn run costs far more than two 70-turn
+runs (retro: the two longest runs were 18% of all tokens). A run that reports `remaining:` gets a fresh run for the rest.
 
 ### Live stacks / worktree (optional)
 Use the `parallel-worktree-run` skill: `parallel-task.sh start <slug> <native|docker>`, dispatch the builder with that worktree as
@@ -59,7 +63,9 @@ SAME agent with `SendMessage`. A 3rd round for one agent+task is refused by the 
 and tell the user what is unclear.
 
 ## 4. Verify
-`qa` (against a live stack URL if one exists), then `reviewer` on the full diff. Both tag every red check `NEW` or `BASELINE`
+`qa` (against a live stack URL if one exists), then `reviewer` on the full diff. If the repo requires a PR doc (e.g. `pr-doc`),
+write it BEFORE the reviewer runs: the reviewer checks its claims against the AC and the repo's length cap. After every fix round,
+update the doc where the fix changed what it claims; the final reviewer pass re-checks it. Both tag every red check `NEW` or `BASELINE`
 against `baseline.md`; only `NEW` enters the fix loop. Do not trust replies: read the evidence (command, exit
 code, pass/fail counts) and check builders stayed inside their territory (`references/delegation-brief.md`).
 Each finding: `team-log review_finding --from reviewer --body "<sev | file:line | issue>"`.
@@ -67,12 +73,14 @@ Blockers climb `references/escalation-ladder.md` (R1 builder → R2 diagnosis �
 
 ## 5. Close
 1. **Verify before PR**: `qa` runs the repo's full verify suite with `team-cores` workers. It must PASS (red allowed only on
-   `BASELINE` checks left unfixed); a `NEW` red goes back up the escalation ladder. Then follow the repo's PR rules (e.g. `pr-doc`).
+   `BASELINE` checks left unfixed); a `NEW` red goes back up the escalation ladder. Then follow the repo's other PR rules.
 2. `team-report` for the gate and decided-by counts.
 3. ONE `AskUserQuestion` with the end report — built, decided by you, decided by the user, open assumptions, **Baseline**
-   (fixed / still red + why), verify evidence — and the choice `Commit + push + draft PR` / `Commit only` / `Stop`.
+   (fixed / still red + why), verify evidence, **Open items** (reviewer PRE-EXISTING/info findings likely to be the next report)
+   — and the choice `Commit + push + draft PR` / `Commit only` / `Stop`, plus `Fix open items first` when there are open items.
 4. On approval: commit, push, `gh pr create --draft`. The hook logs `pr` (the URL) and `feature_end` from that command by
-   itself: do not log them by hand, and log nothing after it (the feature is closed). Suggest `/agent-team:team-retro`.
+   itself: do not log them by hand, and log nothing after it (the feature is closed). If a live stack was provisioned for this
+   work, rebuild it from the pushed commit right after the push (the user should not have to ask). Suggest `/agent-team:team-retro`.
    **New session on the same ticket** (resume, restart): re-run `team-log feature_start --ticket <n> ...` first; it binds this
    session, otherwise the hook ignores this session's prompts and briefs.
 
@@ -101,3 +109,5 @@ backfill it with `team-log` prefixed `[backfilled]` and note it: a missing autom
 - Never describe your own or an agent's "accepted" as the user's approval; `decided_by` must be true.
 - Subagents' final messages are the source of truth for the log; don't paraphrase their questions.
 - Don't implement code yourself except to unblock a mechanical conflict.
+- Never pass `model` when dispatching: the agent file's model is the one triage chose. Sole exception: the R2 diagnosis on opus
+  (`references/escalation-ladder.md`).
